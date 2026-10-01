@@ -1,4 +1,4 @@
-# edns
+# edns.upset.dev
 
 [![CI](https://github.com/upsetdev/edns/actions/workflows/ci.yml/badge.svg)](https://github.com/upsetdev/edns/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -184,29 +184,29 @@ ingress routing mesh, for example) makes every lookup report the proxy's IP.
 
 All configuration is through environment variables.
 
-| Variable       | Default                  | Description |
-|----------------|--------------------------|-------------|
-| `HTTP_IP`      | **required**             | Public IPv4 returned in `A` answers for the zone. |
-| `HTTP_IPV6`    | _(empty)_                | Public IPv6 returned in `AAAA` answers. |
-| `BASE_DOMAIN`  | `edns.upset.dev`         | The zone this server is authoritative for. |
-| `NS`           | `ns1.<base>,ns2.<base>`  | Comma-separated authoritative nameserver hostnames. |
-| `HOSTMASTER`   | `hostmaster.<base>`      | SOA RNAME (contact mailbox, `.` instead of `@`). |
-| `DNS_ADDR`     | `:53`                    | DNS listen address (UDP and TCP). |
-| `DNS_UDP_ADDR` | `$DNS_ADDR`              | Separate UDP listen address (Fly.io: `fly-global-services:53`). |
-| `HTTP_ADDR`    | `:8080`                  | HTTP listen address. |
-| `HTTPS_ADDR`   | `:8443`                  | HTTPS listen address. |
-| `STORE`        | `memory`                 | `memory` (single instance) or `redis` (shared between instances). |
-| `REDIS_ADDR`   | `redis:6379`             | Redis `host:port`, with `STORE=redis`. |
-| `REDIS_URL`    | _(empty)_                | `redis://user:pass@host:port`. Overrides `REDIS_ADDR` when set. |
-| `TOKEN_SECRET` | _(random per process)_   | HMAC key for tokens, at least 32 characters. Must match across instances. |
-| `DNS_RATE_LIMIT` | `20`                   | DNS queries per second per source `/24` or `/56`, bursting to 5×. `0` disables. |
-| `HTTP_RATE_LIMIT` | `2`                   | HTTP requests per second per client IPv4 or IPv6 `/64`, bursting to 5×. `0` disables. |
-| `PROXY_PROTOCOL` | `false`                | Require a PROXY protocol header on TCP listeners (DNS, HTTP, HTTPS). |
-| `TLS`          | `true`                   | Serve HTTPS with CertMagic and redirect plain HTTP to it. |
-| `ACME_EMAIL`   | _(empty)_                | Let's Encrypt account contact. |
-| `ACME_STAGING` | `false`                  | Use the Let's Encrypt staging CA, for testing. |
-| `CERT_STORE`   | `file`                   | `file` (`CERT_DIR`) or `redis` (shared by instances; requires `STORE=redis`). |
-| `CERT_DIR`     | `/data`                  | Certificate storage directory, with `CERT_STORE=file`. |
+| Variable          | Default                 | Description                                                                           |
+| ----------------- | ----------------------- | ------------------------------------------------------------------------------------- |
+| `HTTP_IP`         | **required**            | Public IPv4 returned in `A` answers for the zone.                                     |
+| `HTTP_IPV6`       | _(empty)_               | Public IPv6 returned in `AAAA` answers.                                               |
+| `BASE_DOMAIN`     | `edns.upset.dev`        | The zone this server is authoritative for.                                            |
+| `NS`              | `ns1.<base>,ns2.<base>` | Comma-separated authoritative nameserver hostnames.                                   |
+| `HOSTMASTER`      | `hostmaster.<base>`     | SOA RNAME (contact mailbox, `.` instead of `@`).                                      |
+| `DNS_ADDR`        | `:53`                   | DNS listen address (UDP and TCP).                                                     |
+| `DNS_UDP_ADDR`    | `$DNS_ADDR`             | Separate UDP listen address (Fly.io: `fly-global-services:53`).                       |
+| `HTTP_ADDR`       | `:8080`                 | HTTP listen address.                                                                  |
+| `HTTPS_ADDR`      | `:8443`                 | HTTPS listen address.                                                                 |
+| `STORE`           | `memory`                | `memory` (single instance) or `redis` (shared between instances).                     |
+| `REDIS_ADDR`      | `redis:6379`            | Redis `host:port`, with `STORE=redis`.                                                |
+| `REDIS_URL`       | _(empty)_               | `redis://user:pass@host:port`. Overrides `REDIS_ADDR` when set.                       |
+| `TOKEN_SECRET`    | _(random per process)_  | HMAC key for tokens, at least 32 characters. Must match across instances.             |
+| `DNS_RATE_LIMIT`  | `20`                    | DNS queries per second per source `/24` or `/56`, bursting to 5×. `0` disables.       |
+| `HTTP_RATE_LIMIT` | `2`                     | HTTP requests per second per client IPv4 or IPv6 `/64`, bursting to 5×. `0` disables. |
+| `PROXY_PROTOCOL`  | `false`                 | Require a PROXY protocol header on TCP listeners (DNS, HTTP, HTTPS).                  |
+| `TLS`             | `true`                  | Serve HTTPS with CertMagic and redirect plain HTTP to it.                             |
+| `ACME_EMAIL`      | _(empty)_               | Let's Encrypt account contact.                                                        |
+| `ACME_STAGING`    | `false`                 | Use the Let's Encrypt staging CA, for testing.                                        |
+| `CERT_STORE`      | `file`                  | `file` (`CERT_DIR`) or `redis` (shared by instances; requires `STORE=redis`).         |
+| `CERT_DIR`        | `/data`                 | Certificate storage directory, with `CERT_STORE=file`.                                |
 
 The server refuses to start if the configuration is invalid, for example when
 `HTTP_IP` is missing or isn't an IPv4 address.

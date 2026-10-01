@@ -19,8 +19,8 @@ var favicon []byte
 var faviconModTime = time.Now()
 
 // newHTTPHandler builds the complete HTTP handler chain.
-func newHTTPHandler(cfg Config, store *Store) http.Handler {
-	h := &httpHandler{cfg: cfg, store: store}
+func newHTTPHandler(cfg Config, store Store) http.Handler {
+	h := &httpHandler{cfg: cfg, store: store, limit: newLimiter(cfg.HTTPRateLimit)}
 	mux := http.NewServeMux()
 	// Served on every host (apex and token subdomains) without touching the
 	// store, so a browser's automatic favicon fetch costs no Redis command.
@@ -36,7 +36,24 @@ func newHTTPHandler(cfg Config, store *Store) http.Handler {
 	return handler
 }
 
-func serveHTTP(cfg Config, store *Store) {
+// httpMaxConns caps concurrent connections per listener, so a connection
+// flood queues in the kernel instead of exhausting the VM's memory.
+const httpMaxConns = 1024
+
+// newHTTPServer returns a server with timeouts on every phase of a request,
+// so slow or idle clients can't hold connections open indefinitely.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    8 << 10,
+	}
+}
+
+func serveHTTP(cfg Config, store Store) {
 	handler := newHTTPHandler(cfg, store)
 
 	// HTTPS: CertMagic obtains and auto-renews the wildcard cert via an
@@ -46,24 +63,22 @@ func serveHTTP(cfg Config, store *Store) {
 		if err != nil {
 			log.Fatalf("tls setup: %v", err)
 		}
-		ln, err := tls.Listen("tcp", cfg.HTTPSAddr, tlsCfg)
+		ln, err := listen(cfg.HTTPSAddr, cfg.ProxyProtocol, httpMaxConns)
 		if err != nil {
 			log.Fatalf("https listen: %v", err)
 		}
 		go func() {
 			log.Printf("HTTPS listening on %s", cfg.HTTPSAddr)
-			srv := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
-			log.Fatal(srv.Serve(ln))
+			log.Fatal(newHTTPServer(handler).Serve(tls.NewListener(ln, tlsCfg)))
 		}()
 	}
 
-	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
+	ln, err := listen(cfg.HTTPAddr, cfg.ProxyProtocol, httpMaxConns)
+	if err != nil {
+		log.Fatalf("http listen: %v", err)
 	}
 	log.Printf("HTTP listening on %s (base=%s a=%s)", cfg.HTTPAddr, cfg.BaseDomain, cfg.HTTPIP)
-	log.Fatal(srv.ListenAndServe())
+	log.Fatal(newHTTPServer(handler).Serve(ln))
 }
 
 // isSecure reports whether the request reached us over HTTPS, either directly
@@ -113,10 +128,21 @@ func serveFavicon(w http.ResponseWriter, r *http.Request) {
 
 type httpHandler struct {
 	cfg   Config
-	store *Store
+	store Store
+	limit *limiter // per client IPv4 or IPv6 /64; nil = unlimited
 }
 
 func (h *httpHandler) handle(w http.ResponseWriter, r *http.Request) {
+	clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		clientIP = r.RemoteAddr
+	}
+	if !h.limit.allow(prefixKey(clientIP, 32, 64), time.Now()) {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
+		return
+	}
+
 	host := strings.ToLower(r.Host)
 	if hostOnly, _, err := net.SplitHostPort(host); err == nil {
 		host = hostOnly
@@ -128,8 +154,8 @@ func (h *httpHandler) handle(w http.ResponseWriter, r *http.Request) {
 		h.mint(w, r)
 	case strings.HasSuffix(host, "."+base):
 		token := strings.TrimSuffix(host, "."+base)
-		if !isToken(token) {
-			http.NotFound(w, r)
+		if _, ok := verifyToken(h.cfg, token, time.Now()); !ok {
+			http.Error(w, `{"error":"unknown or expired token"}`, http.StatusNotFound)
 			return
 		}
 		h.report(w, token)
@@ -139,10 +165,10 @@ func (h *httpHandler) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // mint creates a fresh token and redirects the client to <token>.base so that
-// resolving the new name forces a DNS lookup we can observe.
+// resolving the new name forces a DNS lookup we can observe. Tokens are
+// signed, so minting stores nothing.
 func (h *httpHandler) mint(w http.ResponseWriter, r *http.Request) {
-	token := randToken(tokenLen)
-	h.store.Put(token, &Result{Token: token, CreatedAt: time.Now().Unix()})
+	token := mintToken(h.cfg, time.Now())
 
 	base := strings.TrimSuffix(h.cfg.BaseDomain, ".")
 	// Always hand out an HTTPS target when TLS is available; insecure requests
@@ -157,12 +183,12 @@ func (h *httpHandler) mint(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, loc, http.StatusFound)
 }
 
-// report returns the captured DNS data for a token.
+// report returns the captured DNS data for a verified token. A token with no
+// capture yet reports an empty resolver.
 func (h *httpHandler) report(w http.ResponseWriter, token string) {
 	res, ok := h.store.Get(token)
 	if !ok {
-		http.Error(w, `{"error":"unknown or expired token"}`, http.StatusNotFound)
-		return
+		res = &Result{Token: token}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

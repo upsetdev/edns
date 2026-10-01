@@ -1,13 +1,14 @@
 package main
 
 import (
+	"net"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/miekg/dns"
 )
-
-const tok = "0123456789abcdef"
 
 func TestDNSAnswersZoneRecords(t *testing.T) {
 	store, _ := newTestStore(t)
@@ -81,7 +82,7 @@ func TestDNSCapturesResolverAndECS(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store, _ := newTestStore(t)
 			h := &dnsHandler{cfg: testConfig(), store: store}
-			store.Put(tok, &Result{Token: tok})
+			tok := newToken()
 
 			query(t, h, tok+".example.test", dns.TypeA, "198.51.100.7", tt.ecs)
 
@@ -99,23 +100,26 @@ func TestDNSCapturesResolverAndECS(t *testing.T) {
 	}
 }
 
-func TestDNSCaptureIgnoresUnknownAndJunk(t *testing.T) {
+func TestDNSCaptureIgnoresForgedExpiredAndJunk(t *testing.T) {
 	store, mr := newTestStore(t)
-	h := &dnsHandler{cfg: testConfig(), store: store}
+	cfg := testConfig()
+	h := &dnsHandler{cfg: cfg, store: store}
 
-	// A well-formed but unminted token must not be created by a lookup.
-	query(t, h, "fedcba9876543210.example.test", dns.TypeA, "198.51.100.1", "")
-	if mr.Exists(key("fedcba9876543210")) {
-		t.Error("lookup of an unminted token created it")
-	}
+	other := cfg
+	other.TokenSecret = []byte("some-other-secret-some-other-secret")
+	expired := mintToken(cfg, time.Now().Add(-2*cfg.TTL))
+	forged := mintToken(other, time.Now())
 
-	// Labels that cannot be tokens must not cost a Redis command.
-	before := mr.CommandCount()
-	for _, name := range []string{"www.example.test", "a.b.example.test", "0123456789abcdeg.example.test"} {
+	// None of these may cost a Redis command: forged and expired tokens fail
+	// the MAC/expiry check in memory, and junk labels can't be tokens at all.
+	for _, name := range []string{
+		forged + ".example.test", expired + ".example.test",
+		"www.example.test", "a.b.example.test", "0123456789abcdef.example.test",
+	} {
 		query(t, h, name, dns.TypeA, "198.51.100.1", "")
 	}
-	if n := mr.CommandCount() - before; n != 0 {
-		t.Errorf("junk lookups ran %d Redis commands, want 0", n)
+	if n := mr.CommandCount(); n != 0 {
+		t.Errorf("invalid lookups ran %d Redis commands, want 0", n)
 	}
 }
 
@@ -123,11 +127,108 @@ func TestDNSCaptureIsCaseInsensitive(t *testing.T) {
 	// Resolvers randomize query case (DNS 0x20), so the token must still match.
 	store, _ := newTestStore(t)
 	h := &dnsHandler{cfg: testConfig(), store: store}
-	store.Put(tok, &Result{Token: tok})
+	tok := newToken()
 
-	query(t, h, "0123456789ABCDEF.Example.TEST", dns.TypeA, "198.51.100.7", "")
+	query(t, h, strings.ToUpper(tok)+".Example.TEST", dns.TypeA, "198.51.100.7", "")
 	if res, _ := store.Get(tok); res == nil || !res.Resolved {
 		t.Fatal("mixed-case lookup was not captured")
+	}
+}
+
+func TestDNSCaptureGuardCapsRedisWrites(t *testing.T) {
+	store, mr := newTestStore(t)
+	h := newDNSHandler(testConfig(), store)
+	h.udpLimit = nil
+	tok := newToken()
+
+	// The first capture is one SET (plus go-redis's connection handshake,
+	// hence the baseline). Repeats of an identical capture are free, and
+	// distinct ones stop after captureMaxWrites in total.
+	query(t, h, tok+".example.test", dns.TypeA, "198.51.100.7", "")
+	base := mr.CommandCount()
+	for range 10 {
+		query(t, h, tok+".example.test", dns.TypeA, "198.51.100.7", "")
+	}
+	if n := mr.CommandCount() - base; n != 0 {
+		t.Fatalf("identical captures ran %d Redis commands, want 0", n)
+	}
+	for i := range 10 {
+		query(t, h, tok+".example.test", dns.TypeA, "198.51.100."+strconv.Itoa(10+i), "")
+	}
+	if n := mr.CommandCount() - base; n != captureMaxWrites-1 {
+		t.Fatalf("distinct captures ran %d Redis commands, want %d", n, captureMaxWrites-1)
+	}
+}
+
+func TestDNSMemoryStoreHasNoCaptureGuard(t *testing.T) {
+	cfg := testConfig()
+	cfg.Store = "memory"
+	if h := newDNSHandler(cfg, newMemStore()); h.guard != nil {
+		t.Error("memory store should not cap capture writes")
+	}
+}
+
+func TestDNSRateLimit(t *testing.T) {
+	store, mr := newTestStore(t)
+	h := &dnsHandler{cfg: testConfig(), store: store, udpLimit: newLimiter(1), tcpLimit: newLimiter(1)} // burst 5
+	now := time.Now()
+	h.now = func() time.Time { return now }
+	tok := newToken()
+
+	for i := range 5 {
+		if m := query(t, h, "example.test", dns.TypeA, "198.51.100."+strconv.Itoa(i), ""); m.Truncated || len(m.Answer) == 0 {
+			t.Fatalf("query %d within burst was limited", i)
+		}
+	}
+	// The whole /24 shares one bucket: the next UDP query gets an empty
+	// truncated reply and does not capture.
+	m := query(t, h, tok+".example.test", dns.TypeA, "198.51.100.200", "")
+	if !m.Truncated || len(m.Answer) != 0 || len(m.Ns) != 0 {
+		t.Fatalf("over limit: tc=%v answer=%v ns=%v, want empty truncated reply", m.Truncated, m.Answer, m.Ns)
+	}
+	if mr.CommandCount() != 0 {
+		t.Error("a rate-limited query reached Redis")
+	}
+
+	// The truncated reply's TCP retry has its own bucket, so a spoofed UDP
+	// flood can't lock the real resolver out. Past the TCP limit the source
+	// is genuine, so the reply is REFUSED rather than TC.
+	tcp := func() *dns.Msg {
+		req := new(dns.Msg)
+		req.SetQuestion("example.test.", dns.TypeA)
+		w := &fakeDNSWriter{remote: &net.TCPAddr{IP: net.ParseIP("198.51.100.1"), Port: 40000}}
+		h.handle(w, req)
+		return w.msg
+	}
+	for i := range 5 {
+		if m := tcp(); m.Rcode != dns.RcodeSuccess || len(m.Answer) == 0 {
+			t.Fatalf("TCP query %d after UDP limit: rcode=%s, want an answer", i, dns.RcodeToString[m.Rcode])
+		}
+	}
+	if m := tcp(); m.Rcode != dns.RcodeRefused || m.Truncated {
+		t.Fatalf("TCP over limit: rcode=%s tc=%v, want REFUSED", dns.RcodeToString[m.Rcode], m.Truncated)
+	}
+
+	// Another /24 is unaffected, and the bucket refills over time.
+	if m := query(t, h, "example.test", dns.TypeA, "198.51.101.1", ""); m.Truncated {
+		t.Fatal("a different /24 was limited")
+	}
+	now = now.Add(2 * time.Second)
+	if m := query(t, h, "example.test", dns.TypeA, "198.51.100.1", ""); m.Truncated {
+		t.Fatal("bucket did not refill")
+	}
+}
+
+func TestDNSAnswersANYMinimally(t *testing.T) {
+	store, _ := newTestStore(t)
+	h := &dnsHandler{cfg: testConfig(), store: store}
+
+	m := query(t, h, "example.test", dns.TypeANY, "198.51.100.1", "")
+	if len(m.Answer) != 1 {
+		t.Fatalf("ANY answer = %v, want a single record", m.Answer)
+	}
+	if hinfo, ok := m.Answer[0].(*dns.HINFO); !ok || hinfo.Cpu != "RFC8482" {
+		t.Fatalf("ANY answer = %v, want RFC 8482 HINFO", m.Answer[0])
 	}
 }
 

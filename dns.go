@@ -10,35 +10,95 @@ import (
 	"github.com/miekg/dns"
 )
 
-func serveDNS(cfg Config, store *Store) {
-	h := &dnsHandler{cfg: cfg, store: store}
+// dnsMaxTCPConns caps concurrent DNS-over-TCP connections. Real resolvers
+// only use TCP to retry truncated answers, so this is generous.
+const dnsMaxTCPConns = 512
+
+func serveDNS(cfg Config, store Store) {
+	h := newDNSHandler(cfg, store)
 	dns.HandleFunc(".", h.handle)
 
-	// UDP and TCP (large answers / retries fall back to TCP).
 	// UDP may need its own bind address: on Fly.io it must listen on
 	// fly-global-services so replies leave from the anycast IP.
-	addrs := map[string]string{"udp": cfg.DNSUDPAddr, "tcp": cfg.DNSAddr}
-	for _, net_ := range []string{"udp", "tcp"} {
-		srv := &dns.Server{Addr: addrs[net_], Net: net_}
-		go func(s *dns.Server) {
-			log.Printf("DNS listening on %s/%s", s.Addr, s.Net)
-			if err := s.ListenAndServe(); err != nil {
-				log.Fatalf("dns %s: %v", s.Net, err)
-			}
-		}(srv)
+	udp := &dns.Server{Addr: cfg.DNSUDPAddr, Net: "udp"}
+	go func() {
+		log.Printf("DNS listening on %s/udp", udp.Addr)
+		log.Fatalf("dns udp: %v", udp.ListenAndServe())
+	}()
+
+	// TCP (large answers / retries over TCP after a truncated UDP reply).
+	ln, err := listen(cfg.DNSAddr, cfg.ProxyProtocol, dnsMaxTCPConns)
+	if err != nil {
+		log.Fatalf("dns tcp: %v", err)
 	}
-	select {} // keep goroutine alive
+	tcp := &dns.Server{
+		Listener:      ln,
+		Net:           "tcp",
+		ReadTimeout:   2 * time.Second,
+		WriteTimeout:  2 * time.Second,
+		IdleTimeout:   func() time.Duration { return 8 * time.Second },
+		MaxTCPQueries: 128,
+	}
+	log.Printf("DNS listening on %s/tcp", cfg.DNSAddr)
+	log.Fatalf("dns tcp: %v", tcp.ActivateAndServe())
 }
 
 type dnsHandler struct {
-	cfg   Config
-	store *Store
+	cfg      Config
+	store    Store
+	now      func() time.Time
+	udpLimit *limiter      // per source prefix; nil = unlimited
+	tcpLimit *limiter      // separate, so spoofed UDP can't lock out the TCP retry
+	guard    *captureGuard // caps Redis writes per token; nil = unlimited
+}
+
+func newDNSHandler(cfg Config, store Store) *dnsHandler {
+	h := &dnsHandler{
+		cfg:      cfg,
+		store:    store,
+		udpLimit: newLimiter(cfg.DNSRateLimit),
+		tcpLimit: newLimiter(cfg.DNSRateLimit),
+	}
+	// Captures cost money only in Redis; in memory a repeat write is free.
+	if cfg.Store == "redis" {
+		h.guard = newCaptureGuard()
+	}
+	return h
+}
+
+func (h *dnsHandler) clock() time.Time {
+	if h.now != nil {
+		return h.now()
+	}
+	return time.Now()
 }
 
 func (h *dnsHandler) handle(w dns.ResponseWriter, r *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Authoritative = true
+
+	// Response rate limiting per source prefix, before any work. Over UDP
+	// the reply is an empty truncated answer: no bigger than the query, so
+	// useless for reflection, while a real resolver retries over TCP, which
+	// a spoofed source cannot complete. TCP has its own buckets, so a spoofed
+	// flood claiming a real resolver's prefix can't block that retry; a TCP
+	// source is genuine, so over its own limit it is simply refused.
+	_, udp := w.RemoteAddr().(*net.UDPAddr)
+	limit := h.tcpLimit
+	if udp {
+		limit = h.udpLimit
+	}
+	if !limit.allow(prefixKey(addrIP(w.RemoteAddr()), 24, 56), h.clock()) {
+		m.Authoritative = false
+		if udp {
+			m.Truncated = true
+		} else {
+			m.Rcode = dns.RcodeRefused
+		}
+		_ = w.WriteMsg(m)
+		return
+	}
 
 	if len(r.Question) == 0 {
 		_ = w.WriteMsg(m)
@@ -101,6 +161,13 @@ func (h *dnsHandler) handle(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	switch q.Qtype {
+	case dns.TypeANY:
+		// RFC 8482: answer ANY with a single small synthesized record rather
+		// than everything we have, so it can't be used for amplification.
+		m.Answer = append(m.Answer, &dns.HINFO{
+			Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeHINFO, Class: dns.ClassINET, Ttl: 3600},
+			Cpu: "RFC8482",
+		})
 	case dns.TypeSOA:
 		m.Answer = append(m.Answer, h.soa(base))
 	case dns.TypeNS:
@@ -108,8 +175,10 @@ func (h *dnsHandler) handle(w dns.ResponseWriter, r *dns.Msg) {
 	case dns.TypeA:
 		// A query for a token subdomain is the signal we care about:
 		// it means a resolver looked the name up on behalf of a client.
-		if label, ok := tokenLabel(qname, base); ok && isToken(label) {
-			h.capture(label, w, r)
+		if label, ok := tokenLabel(qname, base); ok {
+			if expires, ok := verifyToken(h.cfg, label, h.clock()); ok {
+				h.capture(label, expires, w, r)
+			}
 		}
 		if ip := net.ParseIP(h.cfg.HTTPIP); ip != nil {
 			m.Answer = append(m.Answer, &dns.A{
@@ -138,19 +207,24 @@ func (h *dnsHandler) handle(w dns.ResponseWriter, r *dns.Msg) {
 	_ = w.WriteMsg(m)
 }
 
-// capture records the resolver IP and ECS for a token. It only updates an
-// existing token (minted by the HTTP redirect); unknown tokens are ignored.
-func (h *dnsHandler) capture(token string, w dns.ResponseWriter, r *dns.Msg) {
+// capture records the resolver IP and ECS for a verified token.
+func (h *dnsHandler) capture(token string, expires time.Time, w dns.ResponseWriter, r *dns.Msg) {
 	resolverIP := addrIP(w.RemoteAddr())
 	ecs, family := extractECS(r)
+	now := h.clock()
 
-	updated := h.store.Update(token, func(res *Result) {
-		res.ResolverIP = resolverIP
-		res.ECS = ecs
-		res.ECSFamily = family
-		res.Resolved = true
-	})
-	if updated {
+	if !h.guard.allow(token, resolverIP+" "+ecs, expires, now) {
+		return
+	}
+	res := &Result{
+		Token:      token,
+		ResolverIP: resolverIP,
+		ECS:        ecs,
+		ECSFamily:  family,
+		Resolved:   true,
+		CreatedAt:  expires.Add(-h.cfg.TTL).Unix(),
+	}
+	if h.store.Record(token, res, expires) {
 		log.Printf("dns resolve token=%s resolver=%s ecs=%s", token, resolverIP, ecs)
 	}
 }

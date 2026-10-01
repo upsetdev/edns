@@ -13,12 +13,18 @@ import (
 // setupTLS configures CertMagic to obtain and auto-renew a wildcard
 // certificate (edns.upset.dev + *.edns.upset.dev) using a DNS-01 challenge
 // solved in-process, then returns a *tls.Config for our HTTPS listener.
-func setupTLS(cfg Config, store *Store) (*tls.Config, error) {
+func setupTLS(cfg Config, store Store) (*tls.Config, error) {
 	base := strings.TrimSuffix(cfg.BaseDomain, ".")
 
-	// Shared cert TXT lives in Redis; cert material is stored on disk per
-	// replica (each replica may hold its own copy of the wildcard cert).
-	certmagic.Default.Storage = &certmagic.FileStorage{Path: cfg.CertDir}
+	// Certificates, keys and the ACME account live on disk (one instance) or
+	// in Redis (shared by replicas, with a distributed lock so only one of
+	// them orders or renews). Either way CertMagic serves handshakes from its
+	// in-memory cache, not from storage.
+	if cfg.CertStore == "redis" {
+		certmagic.Default.Storage = newRedisCertStorage(newRedisClient(cfg.RedisAddr, cfg.RedisURL))
+	} else {
+		certmagic.Default.Storage = &certmagic.FileStorage{Path: cfg.CertDir}
+	}
 
 	acmeIssuer := certmagic.DefaultACME
 	acmeIssuer.Agreed = true
@@ -50,7 +56,7 @@ func setupTLS(cfg Config, store *Store) (*tls.Config, error) {
 // dnsSolver implements acmez.Solver. Because this process is the authoritative
 // DNS server for the zone, "publishing" the challenge record is just a write
 // to the shared store; the DNS handler serves it back to the ACME validator.
-type dnsSolver struct{ store *Store }
+type dnsSolver struct{ store Store }
 
 func (s *dnsSolver) Present(_ context.Context, ch acme.Challenge) error {
 	return s.store.AddTXT(ch.DNS01TXTRecordName(), ch.DNS01KeyAuthorization())

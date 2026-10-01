@@ -19,15 +19,21 @@ func testConfig() Config {
 		HostmasterMail: "hostmaster.example.test.",
 		EnableTLS:      false,
 		TTL:            time.Hour,
+		Store:          "redis",
+		TokenSecret:    []byte("test-secret-test-secret-test-secret"),
 	}
 }
 
-// newTestStore starts an in-memory Redis and returns a Store backed by it.
-func newTestStore(t *testing.T) (*Store, *miniredis.Miniredis) {
+// newTestStore starts an in-memory Redis and returns a Store backed by it, so
+// tests can count the Redis commands a code path costs.
+func newTestStore(t *testing.T) (Store, *miniredis.Miniredis) {
 	t.Helper()
 	mr := miniredis.RunT(t)
-	return NewStore(mr.Addr(), "", time.Hour), mr
+	return newRedisStore(mr.Addr(), ""), mr
 }
+
+// newToken mints a valid token for testConfig.
+func newToken() string { return mintToken(testConfig(), time.Now()) }
 
 // fakeDNSWriter captures the reply a dns handler writes.
 type fakeDNSWriter struct {

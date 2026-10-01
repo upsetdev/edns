@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -39,7 +40,7 @@ func TestEndToEndLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 	token, _, _ := strings.Cut(loc.Host, ".")
-	if !isToken(token) || loc.Host != token+".example.test" {
+	if _, ok := verifyToken(cfg, token, time.Now()); !ok || loc.Host != token+".example.test" {
 		t.Fatalf("redirect to %q, want <token>.example.test", loc)
 	}
 
@@ -66,9 +67,20 @@ func TestEndToEndLookup(t *testing.T) {
 	}
 }
 
+func TestMintCostsNoRedis(t *testing.T) {
+	store, mr := newTestStore(t)
+	if rec := get(newHTTPHandler(testConfig(), store), "GET", "http://example.test/", nil); rec.Code != http.StatusFound {
+		t.Fatalf("mint status = %d", rec.Code)
+	}
+	if n := mr.CommandCount(); n != 0 {
+		t.Errorf("mint ran %d Redis commands, want 0", n)
+	}
+}
+
 func TestReportOmitsEDNSWithoutSubnet(t *testing.T) {
 	store, _ := newTestStore(t)
-	store.Put(tok, &Result{Token: tok, ResolverIP: "198.51.100.7", ECS: "none", Resolved: true})
+	tok := newToken()
+	store.Record(tok, &Result{Token: tok, ResolverIP: "198.51.100.7", ECS: "none", Resolved: true}, time.Now().Add(time.Hour))
 
 	rec := get(newHTTPHandler(testConfig(), store), "GET", "http://"+tok+".example.test/", nil)
 	if strings.Contains(rec.Body.String(), "edns") {
@@ -76,22 +88,74 @@ func TestReportOmitsEDNSWithoutSubnet(t *testing.T) {
 	}
 }
 
-func TestReportRejectsUnknownAndInvalidTokens(t *testing.T) {
-	store, mr := newTestStore(t)
-	handler := newHTTPHandler(testConfig(), store)
-
-	if rec := get(handler, "GET", "http://fedcba9876543210.example.test/", nil); rec.Code != http.StatusNotFound {
-		t.Errorf("unknown token status = %d, want 404", rec.Code)
+func TestReportBeforeCapture(t *testing.T) {
+	store, _ := newTestStore(t)
+	rec := get(newHTTPHandler(testConfig(), store), "GET", "http://"+newToken()+".example.test/", nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ip": ""`) {
+		t.Fatalf("uncaptured token: status=%d body=%s, want 200 with an empty resolver", rec.Code, rec.Body)
 	}
+}
 
-	before := mr.CommandCount()
-	for _, host := range []string{"www.example.test", "a.b.example.test", "example.com"} {
+func TestReportRejectsForgedExpiredAndInvalidTokens(t *testing.T) {
+	store, mr := newTestStore(t)
+	cfg := testConfig()
+	handler := newHTTPHandler(cfg, store)
+
+	other := cfg
+	other.TokenSecret = []byte("some-other-secret-some-other-secret")
+	for _, host := range []string{
+		mintToken(other, time.Now()) + ".example.test",
+		mintToken(cfg, time.Now().Add(-2*cfg.TTL)) + ".example.test",
+		"www.example.test", "a.b.example.test", "example.com",
+	} {
 		if rec := get(handler, "GET", "http://"+host+"/", nil); rec.Code != http.StatusNotFound {
 			t.Errorf("%s status = %d, want 404", host, rec.Code)
 		}
 	}
-	if n := mr.CommandCount() - before; n != 0 {
+	if n := mr.CommandCount(); n != 0 {
 		t.Errorf("invalid hosts ran %d Redis commands, want 0", n)
+	}
+}
+
+func TestHTTPRateLimit(t *testing.T) {
+	store, _ := newTestStore(t)
+	cfg := testConfig()
+	cfg.HTTPRateLimit = 1 // burst 5
+	handler := newHTTPHandler(cfg, store)
+
+	from := func(addr string) int {
+		req := httptest.NewRequest("GET", "http://example.test/", nil)
+		req.RemoteAddr = addr
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	for i := range 5 {
+		if code := from("198.51.100.1:1234"); code != http.StatusFound {
+			t.Fatalf("request %d within burst: status %d", i, code)
+		}
+	}
+	if code := from("198.51.100.1:1234"); code != http.StatusTooManyRequests {
+		t.Fatalf("over limit: status %d, want 429", code)
+	}
+	// Limits are per client: a neighbour in the same /24 is unaffected,
+	// while IPv6 clients are grouped by /64.
+	if code := from("198.51.100.2:1234"); code != http.StatusFound {
+		t.Fatalf("other client: status %d", code)
+	}
+	for range 5 {
+		from("[2001:db8::1]:1234")
+	}
+	if code := from("[2001:db8::2]:1234"); code != http.StatusTooManyRequests {
+		t.Fatalf("same /64: status %d, want 429", code)
+	}
+	// Favicons cost nothing and stay available.
+	req := httptest.NewRequest("GET", "http://example.test/favicon.ico", nil)
+	req.RemoteAddr = "198.51.100.1:1234"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("favicon while limited: status %d", rec.Code)
 	}
 }
 
@@ -99,7 +163,7 @@ func TestFavicon(t *testing.T) {
 	store, mr := newTestStore(t)
 	handler := newHTTPHandler(testConfig(), store)
 
-	for _, host := range []string{"example.test", tok + ".example.test"} {
+	for _, host := range []string{"example.test", newToken() + ".example.test"} {
 		rec := get(handler, "GET", "http://"+host+"/favicon.ico", nil)
 		if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/x-icon" {
 			t.Fatalf("%s: status=%d type=%q", host, rec.Code, rec.Header().Get("Content-Type"))
@@ -135,7 +199,7 @@ func TestForceHTTPS(t *testing.T) {
 
 func TestCORSPreflight(t *testing.T) {
 	store, _ := newTestStore(t)
-	rec := get(newHTTPHandler(testConfig(), store), "OPTIONS", "http://"+tok+".example.test/", nil)
+	rec := get(newHTTPHandler(testConfig(), store), "OPTIONS", "http://"+newToken()+".example.test/", nil)
 	if rec.Code != http.StatusNoContent || rec.Header().Get("Access-Control-Allow-Origin") != "*" {
 		t.Fatalf("preflight: status=%d acao=%q", rec.Code, rec.Header().Get("Access-Control-Allow-Origin"))
 	}

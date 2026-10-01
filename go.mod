@@ -9,7 +9,10 @@ require (
 	github.com/caddyserver/certmagic v0.25.4
 	github.com/mholt/acmez/v3 v3.1.6
 	github.com/miekg/dns v1.1.72
+	github.com/pires/go-proxyproto v0.15.0
 	github.com/redis/go-redis/v9 v9.21.0
+	golang.org/x/net v0.59.0
+	golang.org/x/time v0.16.0
 )
 
 require (
@@ -25,7 +28,6 @@ require (
 	go.uber.org/zap/exp v0.3.0 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/mod v0.41.0 // indirect
-	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect

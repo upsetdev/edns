@@ -1,0 +1,31 @@
+name: Bug report
+description: Something doesn't work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: |
+        Commands and their output help most, for example:
+        `curl -sL https://edns.upset.dev/` or `dig @<server> <name> A`.
+      render: console
+    validations:
+      required: true
+  - type: input
+    id: resolver
+    attributes:
+      label: Resolver / network
+      description: Resolver or DoH provider, VPN, or ISP involved, if relevant.
+  - type: input
+    id: version
+    attributes:
+      label: Deployment
+      description: edns.upset.dev, or self-hosted (commit SHA, platform).

@@ -1,0 +1,83 @@
+# Fly.io deployment. Deploy with:
+#   fly deploy --ha=false
+#
+# Runs as a single Machine in sin only (next to the Upstash primary). Keep it
+# at one: each Machine has its own cert volume and would request its own cert.
+#
+# Requirements (already provisioned for edns-upset-dev):
+#   - a dedicated IPv4 (`fly ips allocate-v4`): Fly only routes UDP on one
+#   - the edns_certs volume for CertMagic certificates
+#   - REDIS_URL secret pointing at the Upstash Redis (`fly redis create`)
+#
+# All services are raw TCP/UDP passthrough (no Fly handlers) so DNS sees the
+# real resolver IP and TLS is terminated in-process by CertMagic.
+
+app = "edns-upset-dev"
+primary_region = "sin"
+
+[build]
+
+[env]
+  BASE_DOMAIN = "edns.upset.dev"
+  NS = "edns1.ns.upset.dev,edns2.ns.upset.dev"
+  HOSTMASTER = "dns.upset.dev"
+  HTTP_IP = "213.188.214.196"
+  HTTP_IPV6 = "2a09:8280:1::1a2:aebb:0"
+  DNS_ADDR = ":5353"
+  # Fly requires UDP services to bind fly-global-services (or replies leave
+  # from the wrong source address) and never rewrites UDP destination ports,
+  # so UDP must listen on 53 itself.
+  DNS_UDP_ADDR = "fly-global-services:53"
+  HTTP_ADDR = ":8080"
+  HTTPS_ADDR = ":8443"
+  CERT_DIR = "/data"
+
+[mounts]
+  source = "edns_certs"
+  destination = "/data"
+
+# DNS over UDP. Stopped machines are not woken by UDP, so keep one running.
+[[services]]
+  protocol = "udp"
+  internal_port = 53
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 53
+
+# DNS over TCP. Note: Fly's proxy hides the source IP on TCP, so captures
+# from TCP fallback queries record a Fly address. UDP is unaffected.
+[[services]]
+  protocol = "tcp"
+  internal_port = 5353
+  auto_stop_machines = "off"
+
+  [[services.ports]]
+    port = 53
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8080
+  auto_stop_machines = "off"
+
+  [[services.ports]]
+    port = 80
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "10s"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8443
+  auto_stop_machines = "off"
+
+  [[services.ports]]
+    port = 443
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

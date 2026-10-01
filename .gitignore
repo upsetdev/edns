@@ -1,0 +1,15 @@
+# Build output
+/edns
+/tmp/
+/dist/
+
+# Test and coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Local tooling
+.claude/
+.env
+.env.*
+.DS_Store

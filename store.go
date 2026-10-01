@@ -27,8 +27,11 @@ type Result struct {
 // single instance; Redis lets several replicas share state, since capture and
 // report for one token may land on different replicas.
 type Store interface {
-	// Record stores the capture for token until expires, replacing any
-	// earlier capture (the last resolver to ask wins).
+	// Record stores the capture for token until expires, unless the token
+	// already has one: the first lookup is the client following the redirect,
+	// while later ones come from re-resolution elsewhere (other tools or
+	// devices, resolver prefetch, scanners) and would report the wrong
+	// resolver. It returns whether r was stored.
 	Record(token string, r *Result, expires time.Time) bool
 	// Get returns the capture for token, or ok=false if absent or expired.
 	Get(token string) (*Result, bool)
@@ -75,19 +78,20 @@ func newRedisStore(addr, url string) *redisStore {
 
 func key(token string) string { return "edns:" + token }
 
-// Record is a single SET: tokens are self-validating, so there is nothing to
-// read first.
+// Record is a single SET NX: tokens are self-validating, so there is nothing
+// to read first, and NX keeps the first capture.
 func (s *redisStore) Record(token string, r *Result, expires time.Time) bool {
 	ttl := time.Until(expires)
 	if ttl <= 0 {
 		return false
 	}
 	data, _ := json.Marshal(r)
-	if err := s.rdb.Set(ctx, key(token), data, ttl).Err(); err != nil {
+	ok, err := s.rdb.SetNX(ctx, key(token), data, ttl).Result()
+	if err != nil {
 		log.Printf("redis record %s: %v", token, err)
 		return false
 	}
-	return true
+	return ok
 }
 
 func (s *redisStore) Get(token string) (*Result, bool) {

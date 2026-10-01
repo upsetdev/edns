@@ -61,26 +61,40 @@ func TestCaptureGuard(t *testing.T) {
 	now := time.Now()
 	exp := now.Add(time.Hour)
 
-	if !g.allow("t", "a", exp, now) {
+	if !g.first("t", exp, now) {
 		t.Fatal("first capture denied")
 	}
-	if g.allow("t", "a", exp, now) {
-		t.Fatal("identical capture allowed")
+	if g.first("t", exp, now) {
+		t.Fatal("repeat capture allowed")
 	}
-	for i := 1; i < captureMaxWrites; i++ {
-		if !g.allow("t", strconv.Itoa(i), exp, now) {
-			t.Fatalf("distinct capture %d denied", i)
-		}
-	}
-	if g.allow("t", "one-too-many", exp, now) {
-		t.Fatal("capture past captureMaxWrites allowed")
-	}
-	if !g.allow("u", "a", exp, now) {
+	if !g.first("u", exp, now) {
 		t.Fatal("other token denied")
 	}
 	var nilGuard *captureGuard
-	if !nilGuard.allow("t", "a", exp, now) {
-		t.Fatal("nil guard denied")
+	for range 2 {
+		if !nilGuard.first("t", exp, now) {
+			t.Fatal("nil guard denied")
+		}
+	}
+}
+
+func TestCaptureGuardSweepsWhenFull(t *testing.T) {
+	g := newCaptureGuard()
+	now := time.Now()
+	for i := range captureGuardMaxKeys {
+		g.seen[strconv.Itoa(i)] = now.Add(time.Minute)
+	}
+	// Full of live entries: fail open rather than drop a real capture.
+	if !g.first("new", now.Add(time.Hour), now) || len(g.seen) != captureGuardMaxKeys {
+		t.Fatal("full guard should allow without tracking")
+	}
+	// Once those expire they are swept and tracking resumes.
+	later := now.Add(2 * time.Minute)
+	if !g.first("new", later.Add(time.Hour), later) || g.first("new", later.Add(time.Hour), later) {
+		t.Fatal("guard did not resume tracking after sweep")
+	}
+	if len(g.seen) != 1 {
+		t.Errorf("%d entries after sweep, want 1", len(g.seen))
 	}
 }
 

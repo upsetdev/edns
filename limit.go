@@ -98,61 +98,47 @@ func prefixKey(addr string, v4Bits, v6Bits int) string {
 	return p.String()
 }
 
-// captureMaxWrites caps how many times one token's capture is written to
-// Redis. Real lookups produce one or two A queries per token; anything beyond
-// a handful is someone replaying a valid token to run up the Redis bill.
-const captureMaxWrites = 4
-
 // captureGuardMaxKeys bounds the guard's memory. When full it stops tracking
-// new tokens (failing open), since the per-source DNS limit still applies.
+// new tokens (failing open): the store still keeps only the first capture,
+// and the per-source DNS limit still applies.
 const captureGuardMaxKeys = 100000
 
-// captureGuard deduplicates capture writes per token. A nil *captureGuard
-// allows every write.
+// captureGuard remembers which tokens have already been captured, so repeat
+// lookups (resolver retries, prefetch, someone replaying a valid token to run
+// up the Redis bill) are dropped without a Redis command. A nil *captureGuard
+// allows every capture.
 type captureGuard struct {
-	mu      sync.Mutex
-	entries map[string]*captureEntry
-}
-
-type captureEntry struct {
-	writes  int
-	last    string // fingerprint of the last result written
-	expires time.Time
+	mu   sync.Mutex
+	seen map[string]time.Time // token -> expiry
 }
 
 func newCaptureGuard() *captureGuard {
-	return &captureGuard{entries: map[string]*captureEntry{}}
+	return &captureGuard{seen: map[string]time.Time{}}
 }
 
-// allow reports whether a capture with the given fingerprint should be
-// written for token, which expires at expires.
-func (g *captureGuard) allow(token, fingerprint string, expires, now time.Time) bool {
+// first reports whether this is the first capture of token, which expires at
+// expires, and marks it as captured.
+func (g *captureGuard) first(token string, expires, now time.Time) bool {
 	if g == nil {
 		return true
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	e, ok := g.entries[token]
-	if !ok {
-		if len(g.entries) >= captureGuardMaxKeys {
-			for k, e := range g.entries {
-				if !now.Before(e.expires) {
-					delete(g.entries, k)
-				}
-			}
-			if len(g.entries) >= captureGuardMaxKeys {
-				return true
-			}
-		}
-		e = &captureEntry{expires: expires}
-		g.entries[token] = e
-	}
-	if e.last == fingerprint || e.writes >= captureMaxWrites {
+	if _, ok := g.seen[token]; ok {
 		return false
 	}
-	e.writes++
-	e.last = fingerprint
+	if len(g.seen) >= captureGuardMaxKeys {
+		for k, exp := range g.seen {
+			if !now.Before(exp) {
+				delete(g.seen, k)
+			}
+		}
+		if len(g.seen) >= captureGuardMaxKeys {
+			return true
+		}
+	}
+	g.seen[token] = expires
 	return true
 }
 

@@ -40,7 +40,9 @@ host. A lookup takes three steps:
 2. **Capture.** To follow the redirect, the client resolves
    `<token>.edns.upset.dev`. The name is new, so no cache has it, and the query
    reaches this server. The resolver's source IP and any ECS subnet are recorded
-   against the token.
+   against the token. Only the first lookup counts: later ones (another tool or
+   device opening the same link, resolver prefetch) would name a different
+   resolver.
 3. **Report.** The request to the token host returns what was recorded as JSON.
 
 A token carries its own expiry and an HMAC, so the server can check it
@@ -72,8 +74,8 @@ handler then serves it to the ACME validator.
 ### Abuse protection
 
 - **Signed tokens.** Random-subdomain floods and forged or expired tokens are
-  rejected in memory, so they cost no Redis commands. With Redis, repeats of
-  the same capture are skipped, and a token gets at most 4 capture writes.
+  rejected in memory, so they cost no Redis commands. Only a token's first
+  capture is written; later lookups of it are dropped without touching Redis.
 - **DNS rate limiting**, per source `/24` (IPv4) or `/56` (IPv6), with UDP and
   TCP limited separately. Over the UDP limit the reply is an empty truncated
   answer (`TC`), no bigger than the query, so it's useless for reflection. A
@@ -212,9 +214,8 @@ The server refuses to start if the configuration is invalid, for example when
 ### Redis cost
 
 With `STORE=redis`, each lookup uses about 2 Redis commands: 1 to record the
-capture and 1 to report. Minting, favicon requests, repeated identical
-captures, and queries for invalid or expired tokens use none, and a token gets
-at most 4 capture writes. On Upstash Pay-as-you-go ($0.20 per 100K commands),
+capture and 1 to report. Minting, favicon requests, repeat lookups of a
+captured token, and queries for invalid or expired tokens use none. On Upstash Pay-as-you-go ($0.20 per 100K commands),
 10,000 lookups a day come to about $1.20 a month. Set a spending cap on the
 database as well, so a sustained flood can't run up the bill.
 

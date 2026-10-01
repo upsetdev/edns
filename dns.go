@@ -49,7 +49,7 @@ type dnsHandler struct {
 	now      func() time.Time
 	udpLimit *limiter      // per source prefix; nil = unlimited
 	tcpLimit *limiter      // separate, so spoofed UDP can't lock out the TCP retry
-	guard    *captureGuard // caps Redis writes per token; nil = unlimited
+	guard    *captureGuard // skips Redis for already-captured tokens; nil = off
 }
 
 func newDNSHandler(cfg Config, store Store) *dnsHandler {
@@ -59,7 +59,8 @@ func newDNSHandler(cfg Config, store Store) *dnsHandler {
 		udpLimit: newLimiter(cfg.DNSRateLimit),
 		tcpLimit: newLimiter(cfg.DNSRateLimit),
 	}
-	// Captures cost money only in Redis; in memory a repeat write is free.
+	// Captures cost money only in Redis; in memory a repeat is a cheap map
+	// lookup in Record itself.
 	if cfg.Store == "redis" {
 		h.guard = newCaptureGuard()
 	}
@@ -213,7 +214,7 @@ func (h *dnsHandler) capture(token string, expires time.Time, w dns.ResponseWrit
 	ecs, family := extractECS(r)
 	now := h.clock()
 
-	if !h.guard.allow(token, resolverIP+" "+ecs, expires, now) {
+	if !h.guard.first(token, expires, now) {
 		return
 	}
 	res := &Result{

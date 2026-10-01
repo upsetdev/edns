@@ -46,7 +46,10 @@ func (m *memStore) Record(token string, r *Result, expires time.Time) bool {
 		return false
 	}
 	m.maybeSweepLocked(now)
-	if _, ok := m.caps[token]; !ok && len(m.caps) >= memMaxEntries {
+	if e, ok := m.caps[token]; ok && now.Before(e.expires) {
+		return false // keep the first capture
+	}
+	if len(m.caps) >= memMaxEntries {
 		m.sweepLocked(now)
 		if len(m.caps) >= memMaxEntries {
 			return false

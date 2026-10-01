@@ -135,28 +135,47 @@ func TestDNSCaptureIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestDNSCaptureGuardCapsRedisWrites(t *testing.T) {
+// TestDNSKeepsFirstCapture: the first lookup is the client following the
+// redirect; later lookups of the same token (another tool or device, resolver
+// prefetch) must not replace it. Checked on both backends, since Redis relies
+// on the guard plus SET NX and memory on Record alone.
+func TestDNSKeepsFirstCapture(t *testing.T) {
+	redisStore, _ := newTestStore(t)
+	memCfg := testConfig()
+	memCfg.Store = "memory"
+	for name, h := range map[string]*dnsHandler{
+		"redis":  newDNSHandler(testConfig(), redisStore),
+		"memory": newDNSHandler(memCfg, newMemStore()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			h.udpLimit = nil
+			tok := newToken()
+			query(t, h, tok+".example.test", dns.TypeA, "172.253.236.213", "203.0.113.0/24")
+			query(t, h, tok+".example.test", dns.TypeA, "185.40.106.78", "")
+
+			res, ok := h.store.Get(tok)
+			if !ok || res.ResolverIP != "172.253.236.213" || res.ECS != "203.0.113.0/24" {
+				t.Fatalf("capture = %+v, want the first resolver and its ECS", res)
+			}
+		})
+	}
+}
+
+func TestDNSRepeatCapturesCostNoRedis(t *testing.T) {
 	store, mr := newTestStore(t)
 	h := newDNSHandler(testConfig(), store)
 	h.udpLimit = nil
 	tok := newToken()
 
 	// The first capture is one SET (plus go-redis's connection handshake,
-	// hence the baseline). Repeats of an identical capture are free, and
-	// distinct ones stop after captureMaxWrites in total.
+	// hence the baseline). Every later lookup of the token is free.
 	query(t, h, tok+".example.test", dns.TypeA, "198.51.100.7", "")
 	base := mr.CommandCount()
-	for range 10 {
-		query(t, h, tok+".example.test", dns.TypeA, "198.51.100.7", "")
-	}
-	if n := mr.CommandCount() - base; n != 0 {
-		t.Fatalf("identical captures ran %d Redis commands, want 0", n)
-	}
 	for i := range 10 {
 		query(t, h, tok+".example.test", dns.TypeA, "198.51.100."+strconv.Itoa(10+i), "")
 	}
-	if n := mr.CommandCount() - base; n != captureMaxWrites-1 {
-		t.Fatalf("distinct captures ran %d Redis commands, want %d", n, captureMaxWrites-1)
+	if n := mr.CommandCount() - base; n != 0 {
+		t.Fatalf("repeat captures ran %d Redis commands, want 0", n)
 	}
 }
 
@@ -164,7 +183,7 @@ func TestDNSMemoryStoreHasNoCaptureGuard(t *testing.T) {
 	cfg := testConfig()
 	cfg.Store = "memory"
 	if h := newDNSHandler(cfg, newMemStore()); h.guard != nil {
-		t.Error("memory store should not cap capture writes")
+		t.Error("memory store should not need a capture guard")
 	}
 }
 

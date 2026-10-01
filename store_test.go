@@ -39,11 +39,11 @@ func TestStoreRecordAndExpire(t *testing.T) {
 			if !store.Record(tok, &Result{Token: tok, ResolverIP: "198.51.100.7"}, time.Now().Add(time.Hour)) {
 				t.Fatal("Record returned false")
 			}
-			if !store.Record(tok, &Result{Token: tok, ResolverIP: "198.51.100.8"}, time.Now().Add(time.Hour)) {
-				t.Fatal("second Record returned false")
+			if store.Record(tok, &Result{Token: tok, ResolverIP: "198.51.100.8"}, time.Now().Add(time.Hour)) {
+				t.Fatal("second Record returned true, want the first capture kept")
 			}
-			if res, ok := store.Get(tok); !ok || res.ResolverIP != "198.51.100.8" {
-				t.Fatalf("Get = %+v, %v; want the last capture", res, ok)
+			if res, ok := store.Get(tok); !ok || res.ResolverIP != "198.51.100.7" {
+				t.Fatalf("Get = %+v, %v; want the first capture", res, ok)
 			}
 
 			advance(time.Hour + time.Second)

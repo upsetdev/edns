@@ -20,6 +20,13 @@ for this repository. Include:
 You can expect an acknowledgement within a few days. Please give us reasonable
 time to release a fix before disclosing the issue publicly.
 
+## Recognition
+
+edns is a small project, and we're grateful to everyone who takes the time to
+look for problems and report them responsibly. With your permission, we'll
+credit you by name or handle in the published security advisory and in the
+notes for the fix.
+
 ## Scope
 
 In scope: the code in this repository and the service at `edns.upset.dev`, for

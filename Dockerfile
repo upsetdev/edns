@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.98.1-alpine AS build
+FROM rust:1.99.0-alpine AS build
 RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./

@@ -77,6 +77,15 @@ impl HttpHandler {
                 .and_then(|v| v.to_str().ok())
                 .is_some_and(|v| v.eq_ignore_ascii_case("https"));
 
+        // Any other name or address pointed at us (the server's IP, the
+        // fly.dev hostname, ...) has nothing to serve: send people to the
+        // site itself. The target is fixed, so a forged Host header can't
+        // make this an open redirect. No Host at all (HTTP/1.0) still mints.
+        if !self.is_our_host(&request_host(&req)) {
+            let scheme = if self.cfg.enable_tls { "https" } else { "http" };
+            return redirect(req.method(), StatusCode::MOVED_PERMANENTLY, &format!("{scheme}://{}/", self.cfg.apex()));
+        }
+
         if self.cfg.enable_tls && !secure {
             let target = format!("https://{}{}", host_only(&request_host(&req)), request_uri(&req));
             return redirect(req.method(), StatusCode::MOVED_PERMANENTLY, &target);
@@ -119,8 +128,8 @@ impl HttpHandler {
             return resp;
         }
 
-        let host = host_only(&request_host(&req)).to_lowercase();
-        let base = self.cfg.apex(); // the Host header has no trailing dot
+        let host = host_only(&request_host(&req)).trim_end_matches('.').to_lowercase();
+        let base = self.cfg.apex(); // compared without the trailing dot
         if host == base || host.is_empty() {
             return self.mint(req.method(), secure);
         }
@@ -129,6 +138,14 @@ impl HttpHandler {
             Some(_) => text_error(StatusCode::NOT_FOUND, r#"{"error":"unknown or expired token"}"#),
             None => text_error(StatusCode::NOT_FOUND, "404 page not found"),
         }
+    }
+
+    /// Whether a Host header names our zone: the apex or a name under it, in
+    /// any case, with or without a port (or empty, see `serve`).
+    fn is_our_host(&self, host: &str) -> bool {
+        let host = host_only(host).trim_end_matches('.').to_lowercase();
+        let apex = self.cfg.apex();
+        host.is_empty() || host == apex || host.strip_suffix(apex).is_some_and(|p| p.ends_with('.'))
     }
 
     /// Creates a fresh token and redirects the client to <token>.base so that
@@ -447,7 +464,6 @@ mod tests {
             format!("{}.example.test", token::mint(&cfg, SystemTime::now() - 2 * cfg.ttl)),
             "www.example.test".into(),
             "a.b.example.test".into(),
-            "example.com".into(),
         ];
         for host in hosts {
             let (resp, _) = get(&h, &format!("http://{host}/")).await;
@@ -521,6 +537,52 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FOUND);
         assert!(hdr(&resp, "location").starts_with("https://"));
         assert!(!hdr(&resp, "strict-transport-security").is_empty(), "missing HSTS on a secure response");
+    }
+
+    /// Requests for any host outside our zone (the server's IP, the
+    /// fly.dev name, other domains) go to the site's apex, over HTTPS when
+    /// TLS is on, without a detour via https://<that host>/ (whose
+    /// certificate wouldn't match) and without touching the store.
+    #[tokio::test]
+    async fn foreign_hosts_redirect_to_apex() {
+        let store = new_store();
+        let mut cfg = test_config();
+        cfg.enable_tls = true;
+        let h = HttpHandler::new(Arc::new(cfg), store.clone());
+        for host in [
+            "192.0.2.10",
+            "192.0.2.10:80",
+            "[2001:db8::10]",
+            "[2001:db8::10]:443",
+            "edns-upset-dev.fly.dev",
+            "example.com",
+            "notexample.test",
+            "example.test.attacker.example",
+        ] {
+            let (resp, body) = get_with(&h, Method::GET, "/some/path?q=1", &[("host", host)], PEER).await;
+            assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY, "{host}");
+            assert_eq!(hdr(&resp, "location"), "https://example.test/", "{host}");
+            assert!(body.contains("https://example.test/"), "{host}: {body}");
+        }
+        assert_eq!(ops(&store), 0);
+
+        // Without TLS the target is plain HTTP.
+        let h = HttpHandler::new(Arc::new(test_config()), new_store());
+        let (resp, _) = get_with(&h, Method::GET, "/", &[("host", "192.0.2.10")], PEER).await;
+        assert_eq!(hdr(&resp, "location"), "http://example.test/");
+
+        // Our own names are untouched, in any case, port or trailing dot.
+        let tok = token::mint(&test_config(), SystemTime::now());
+        for (host, want) in [
+            ("example.test", StatusCode::FOUND),
+            ("EXAMPLE.test:8080", StatusCode::FOUND),
+            ("example.test.", StatusCode::FOUND),
+            (&*format!("{tok}.example.test"), StatusCode::OK),
+            ("a.b.example.test", StatusCode::NOT_FOUND),
+        ] {
+            let (resp, _) = get_with(&h, Method::GET, "/", &[("host", host)], PEER).await;
+            assert_eq!(resp.status(), want, "{host}");
+        }
     }
 
     #[tokio::test]

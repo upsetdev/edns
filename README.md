@@ -59,6 +59,14 @@ process is the zone's authoritative server, so publishing the challenge only
 means writing a TXT value to the store. The DNS handler then serves it to the
 ACME validator.
 
+### HTTP behaviour
+
+- Requests for any host outside the zone (the server's IP, its `fly.dev`
+  name, another domain pointed at it) are redirected (`301`) to
+  `https://<base>/`.
+- With TLS on, plain HTTP is redirected to HTTPS, and HTTPS responses carry
+  HSTS.
+
 ### DNS behaviour
 
 - Answers `SOA`, `NS`, `A` and `AAAA` for the zone. Other types get `NODATA`

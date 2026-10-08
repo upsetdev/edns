@@ -72,8 +72,8 @@ impl DnsHandler {
             hostmaster: name(&cfg.hostmaster),
             store,
             clock: Clock::system(),
-            udp_limit: Limiter::new(cfg.dns_rate_limit),
-            tcp_limit: Limiter::new(cfg.dns_rate_limit),
+            udp_limit: Limiter::new(cfg.dns_rate_limit, cfg.dns_rate_burst),
+            tcp_limit: Limiter::new(cfg.dns_rate_limit, cfg.dns_rate_burst),
             // Captures cost money only in Redis; in memory a repeat is a
             // cheap map lookup in record itself.
             guard: (cfg.store == StoreKind::Redis).then(CaptureGuard::default),
@@ -565,8 +565,8 @@ mod tests {
     #[tokio::test]
     async fn rate_limit() {
         let mut h = handler();
-        h.udp_limit = Limiter::new(1.0); // burst 5
-        h.tcp_limit = Limiter::new(1.0);
+        h.udp_limit = Limiter::new(1.0, 5);
+        h.tcp_limit = Limiter::new(1.0, 5);
         h.clock = Clock::fixed(SystemTime::now());
         let tok = new_token();
 

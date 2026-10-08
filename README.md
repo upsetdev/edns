@@ -208,8 +208,10 @@ All configuration is through environment variables.
 | `REDIS_ADDR`      | `redis:6379`            | Redis `host:port`, with `STORE=redis`.                                                |
 | `REDIS_URL`       | _(empty)_               | `redis://user:pass@host:port`. Overrides `REDIS_ADDR` when set.                       |
 | `TOKEN_SECRET`    | _(random per process)_  | HMAC key for tokens, at least 32 characters. Must match across instances.             |
-| `DNS_RATE_LIMIT`  | `20`                    | DNS queries per second per source `/24` or `/56`, bursting to 5×. `0` disables.       |
-| `HTTP_RATE_LIMIT` | `2`                     | HTTP requests per second per client IPv4 or IPv6 `/64`, bursting to 5×. `0` disables. |
+| `DNS_RATE_LIMIT`  | `100`                   | DNS queries per second per source `/24` or `/56`. `0` disables.                       |
+| `DNS_RATE_BURST`  | `500`                   | DNS queries allowed at once per source `/24` or `/56`.                                |
+| `HTTP_RATE_LIMIT` | `10`                    | HTTP requests per second per client IPv4 or IPv6 `/64`. `0` disables.                 |
+| `HTTP_RATE_BURST` | `500`                   | HTTP requests allowed at once per client: a 50-lookup run is about 100.               |
 | `PROXY_PROTOCOL`  | `false`                 | Require a PROXY protocol header on TCP listeners (DNS, HTTP, HTTPS).                  |
 | `TLS`             | `true`                  | Serve HTTPS with a Let's Encrypt certificate and redirect plain HTTP to it.           |
 | `ACME_EMAIL`      | _(empty)_               | Let's Encrypt account contact.                                                        |

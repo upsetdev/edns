@@ -56,7 +56,12 @@ pub struct HttpHandler {
 impl HttpHandler {
     pub fn new(cfg: Arc<Config>, store: Arc<Store>) -> Self {
         LazyLock::force(&FAVICON_MODIFIED);
-        HttpHandler { limit: Limiter::new(cfg.http_rate_limit), cfg, store, clock: Clock::system() }
+        HttpHandler {
+            limit: Limiter::new(cfg.http_rate_limit, cfg.http_rate_burst),
+            cfg,
+            store,
+            clock: Clock::system(),
+        }
     }
 
     /// The complete handler chain. When TLS is on, every request is forced
@@ -455,7 +460,8 @@ mod tests {
     #[tokio::test]
     async fn rate_limit() {
         let mut cfg = test_config();
-        cfg.http_rate_limit = 1.0; // burst 5
+        cfg.http_rate_limit = 1.0;
+        cfg.http_rate_burst = 5;
         let h = HttpHandler::new(Arc::new(cfg), new_store());
         let from = |peer: &'static str| {
             let h = &h;
@@ -546,6 +552,7 @@ mod tests {
     async fn server_over_socket() {
         let mut cfg = test_config();
         cfg.http_rate_limit = 1.0;
+        cfg.http_rate_burst = 5;
         let h = Arc::new(HttpHandler::new(Arc::new(cfg), new_store()));
         let ln = Listener::bind("127.0.0.1:0", true, 4).await.unwrap();
         let addr = ln.local_addr().unwrap();

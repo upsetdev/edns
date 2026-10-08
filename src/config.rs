@@ -60,8 +60,12 @@ pub struct Config {
     pub proxy_protocol: bool,
     /// DNS queries/s per source /24 (IPv4) or /56 (IPv6); 0 = off.
     pub dns_rate_limit: f64,
+    /// DNS queries allowed at once per source prefix.
+    pub dns_rate_burst: u32,
     /// HTTP requests/s per client IPv4 or /64; 0 = off.
     pub http_rate_limit: f64,
+    /// HTTP requests allowed at once per client.
+    pub http_rate_burst: u32,
 }
 
 /// Ensures a trailing dot.
@@ -118,8 +122,22 @@ impl Config {
                 _ => bail!("{key} must be a non-negative number, got {raw:?}"),
             }
         };
-        let dns_rate_limit = rate("DNS_RATE_LIMIT", "20")?;
-        let http_rate_limit = rate("HTTP_RATE_LIMIT", "2")?;
+        let burst = |key: &str, default: &str| -> anyhow::Result<u32> {
+            let raw = env(key, default);
+            match raw.parse::<u32>() {
+                Ok(v) if v >= 1 => Ok(v),
+                _ => bail!("{key} must be a positive integer, got {raw:?}"),
+            }
+        };
+        // Sized for upset.dev's DNS leak test, which runs up to 50 lookups
+        // back to back: 2 HTTP requests each from the browser, and 2-3 DNS
+        // queries each from its resolver, which many users share. The DNS
+        // limit only has to stop reflection (replies are ~100 bytes and
+        // tokens can't be forged), so it can be generous.
+        let dns_rate_limit = rate("DNS_RATE_LIMIT", "100")?;
+        let dns_rate_burst = burst("DNS_RATE_BURST", "500")?;
+        let http_rate_limit = rate("HTTP_RATE_LIMIT", "10")?;
+        let http_rate_burst = burst("HTTP_RATE_BURST", "500")?;
 
         let token_secret = match get("TOKEN_SECRET") {
             Some(secret) if secret.len() < 32 => bail!("TOKEN_SECRET must be at least 32 characters"),
@@ -178,7 +196,9 @@ impl Config {
             token_secret,
             proxy_protocol: env("PROXY_PROTOCOL", "false") == "true",
             dns_rate_limit,
+            dns_rate_burst,
             http_rate_limit,
+            http_rate_burst,
         })
     }
 
@@ -222,7 +242,9 @@ pub(crate) mod tests {
             token_secret: b"test-secret-test-secret-test-secret".to_vec(),
             proxy_protocol: false,
             dns_rate_limit: 0.0,
+            dns_rate_burst: 1,
             http_rate_limit: 0.0,
+            http_rate_burst: 1,
         }
     }
 
@@ -242,7 +264,8 @@ pub(crate) mod tests {
         assert_eq!(cfg.store, StoreKind::Memory);
         assert_eq!(cfg.cert_store, CertStoreKind::File);
         assert!(!cfg.proxy_protocol);
-        assert_eq!((cfg.dns_rate_limit, cfg.http_rate_limit), (20.0, 2.0));
+        assert_eq!((cfg.dns_rate_limit, cfg.dns_rate_burst), (100.0, 500));
+        assert_eq!((cfg.http_rate_limit, cfg.http_rate_burst), (10.0, 500));
         assert_eq!(cfg.token_secret.len(), 32, "generated secret");
         assert_eq!(cfg.http_ipv6, None);
     }
@@ -261,6 +284,7 @@ pub(crate) mod tests {
             ("PROXY_PROTOCOL", "true"),
             ("DNS_RATE_LIMIT", "0"),
             ("HTTP_RATE_LIMIT", "0.5"),
+            ("HTTP_RATE_BURST", "40"),
             ("TOKEN_SECRET", &secret),
             ("HTTP_IPV6", "2001:db8::1"),
         ])
@@ -270,7 +294,7 @@ pub(crate) mod tests {
         assert_eq!((cfg.dns_addr.as_str(), cfg.dns_udp_addr.as_str()), (":5353", "fly-global-services:53"));
         assert_eq!((cfg.store, cfg.cert_store), (StoreKind::Redis, CertStoreKind::Redis));
         assert!(cfg.proxy_protocol);
-        assert_eq!((cfg.dns_rate_limit, cfg.http_rate_limit), (0.0, 0.5));
+        assert_eq!((cfg.dns_rate_limit, cfg.http_rate_limit, cfg.http_rate_burst), (0.0, 0.5, 40));
         assert_eq!(cfg.token_secret, secret.as_bytes());
         assert_eq!(cfg.http_ipv6, Some("2001:db8::1".parse().unwrap()));
     }
@@ -288,6 +312,8 @@ pub(crate) mod tests {
             ("bad DNS_RATE_LIMIT", "DNS_RATE_LIMIT", "fast", "DNS_RATE_LIMIT"),
             ("negative HTTP_RATE_LIMIT", "HTTP_RATE_LIMIT", "-1", "HTTP_RATE_LIMIT"),
             ("NaN rate", "DNS_RATE_LIMIT", "NaN", "DNS_RATE_LIMIT"),
+            ("zero burst", "DNS_RATE_BURST", "0", "DNS_RATE_BURST"),
+            ("fractional burst", "HTTP_RATE_BURST", "1.5", "HTTP_RATE_BURST"),
             ("short TOKEN_SECRET", "TOKEN_SECRET", "short", "TOKEN_SECRET"),
             ("bad name", "BASE_DOMAIN", "a..b", "BASE_DOMAIN"),
         ];

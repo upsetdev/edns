@@ -12,8 +12,8 @@ use crate::clock::since;
 /// share one overflow bucket.
 const LIMITER_MAX_KEYS: usize = 65536;
 
-/// How long a bucket can go unused before it is dropped. It must be at least
-/// burst/rate, so that a dropped bucket would have been full anyway.
+/// The least time a bucket can go unused before it is dropped; a limiter
+/// waits longer when its bucket takes longer to refill (see `idle`).
 const LIMITER_IDLE: Duration = Duration::from_secs(60);
 
 /// A token-bucket rate limiter per key (a client address prefix). Code that
@@ -22,6 +22,9 @@ const LIMITER_IDLE: Duration = Duration::from_secs(60);
 pub struct Limiter {
     rate: f64,
     burst: f64,
+    /// How long a bucket can go unused before it is dropped: at least
+    /// burst/rate, so that a dropped bucket would have been full anyway.
+    idle: Duration,
     inner: Mutex<Buckets>,
 }
 
@@ -38,21 +41,26 @@ struct Bucket {
 }
 
 impl Limiter {
-    /// Allows `per_sec` events per key per second, with bursts of up to five
-    /// seconds' worth. Returns `None` (no limit) when `per_sec <= 0`.
-    pub fn new(per_sec: f64) -> Option<Self> {
-        (per_sec > 0.0).then(|| Limiter {
-            rate: per_sec,
-            burst: (5.0 * per_sec).floor().max(1.0),
-            inner: Mutex::new(Buckets { map: HashMap::new(), last_sweep: SystemTime::UNIX_EPOCH }),
+    /// Allows `per_sec` events per key per second on average, and up to
+    /// `burst` at once. Returns `None` (no limit) when `per_sec <= 0`.
+    pub fn new(per_sec: f64, burst: u32) -> Option<Self> {
+        (per_sec > 0.0).then(|| {
+            let burst = f64::from(burst.max(1));
+            Limiter {
+                rate: per_sec,
+                burst,
+                idle: LIMITER_IDLE.max(Duration::from_secs_f64(burst / per_sec)),
+                inner: Mutex::new(Buckets { map: HashMap::new(), last_sweep: SystemTime::UNIX_EPOCH }),
+            }
         })
     }
 
     pub fn allow(&self, key: &str, now: SystemTime) -> bool {
         let mut b = self.inner.lock().unwrap();
 
-        if since(now, b.last_sweep) > LIMITER_IDLE {
-            b.map.retain(|_, bucket| since(now, bucket.last) <= LIMITER_IDLE);
+        if since(now, b.last_sweep) > self.idle {
+            let idle = self.idle;
+            b.map.retain(|_, bucket| since(now, bucket.last) <= idle);
             b.last_sweep = now;
         }
         let key = if !b.map.contains_key(key) && b.map.len() >= LIMITER_MAX_KEYS { "overflow" } else { key };
@@ -131,12 +139,12 @@ mod tests {
 
     #[test]
     fn zero_rate_disables() {
-        assert!(Limiter::new(0.0).is_none());
+        assert!(Limiter::new(0.0, 10).is_none());
     }
 
     #[test]
     fn burst_then_refill() {
-        let l = Limiter::new(1.0).unwrap(); // burst 5
+        let l = Limiter::new(1.0, 5).unwrap();
         let now = SystemTime::now();
         for i in 0..5 {
             assert!(l.allow("k", now), "request {i} within burst denied");
@@ -148,7 +156,7 @@ mod tests {
 
     #[test]
     fn sweeps_idle_and_overflows() {
-        let l = Limiter::new(1.0).unwrap();
+        let l = Limiter::new(1.0, 5).unwrap();
         let now = SystemTime::now();
         for i in 0..LIMITER_MAX_KEYS {
             l.allow(&i.to_string(), now);
@@ -162,6 +170,21 @@ mod tests {
         let later = now + 2 * LIMITER_IDLE;
         assert!(l.allow("another", later));
         assert_eq!(l.inner.lock().unwrap().map.len(), 1, "after sweep");
+    }
+
+    /// The leak test on upset.dev runs up to 50 lookups (100 HTTP requests)
+    /// as fast as it can; the default HTTP burst must take a whole run, and
+    /// refill in time for the next.
+    #[test]
+    fn burst_independent_of_rate() {
+        let l = Limiter::new(5.0, 150).unwrap();
+        let now = SystemTime::now();
+        assert!((0..150).all(|_| l.allow("k", now)), "burst of 150 not honoured");
+        assert!(!l.allow("k", now));
+        assert!(l.allow("k", now + Duration::from_millis(200)), "5/s refill");
+        // A slow-refilling bucket isn't swept (and so reset to full) early.
+        assert_eq!(Limiter::new(1.0, 600).unwrap().idle, Duration::from_secs(600));
+        assert_eq!(l.idle, LIMITER_IDLE);
     }
 
     #[test]

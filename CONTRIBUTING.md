@@ -11,11 +11,13 @@ documentation improvements are all welcome.
 
 ## Development setup
 
-You need Go (version in [`go.mod`](go.mod)) and optionally Docker. The tests use
-an in-memory Redis, so they need no external services:
+You need Rust (version in [`rust-toolchain.toml`](rust-toolchain.toml); rustup
+installs it on first use) and optionally Docker. The tests need no external
+services; `make test-redis` also runs the Redis-backed ones against a
+throwaway Redis in Docker:
 
 ```bash
-make check    # gofmt, go vet, staticcheck, tests with -race, govulncheck
+make check    # rustfmt, clippy, tests, cargo audit
 ```
 
 CI runs the same checks plus a Docker build on every pull request.
@@ -25,9 +27,9 @@ See the [README](README.md#development) for how to run the server locally.
 
 - Keep each PR focused on one change, and explain *why* in the description.
 - Add or update tests for behaviour changes. The end-to-end test in
-  `http_test.go` (mint → capture → report) is a good model.
+  `src/http.rs` (mint → capture → report) is a good model.
 - Keep the code dependency-light and in the style of the surrounding code;
-  `gofmt` is enforced.
+  `cargo fmt` and `cargo clippy -D warnings` are enforced.
 - Update the README when you change behaviour or configuration.
 - Use clear commit messages. A prefix such as `fix:`, `feat:`, or `docs:` is
   appreciated.

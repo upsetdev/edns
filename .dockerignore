@@ -1,9 +1,8 @@
-/edns
+/target/
 /tmp/
 /dist/
 .git/
 .github/
 .claude/
-*_test.go
 *.md
 LICENSE

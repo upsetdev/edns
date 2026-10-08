@@ -1,0 +1,39 @@
+[package]
+name = "edns"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+bytes = "1.12.1"
+hex = "0.4.3"
+hickory-proto = "0.26.3"
+hmac = "0.13.0"
+http = "1.5.0"
+http-body-util = "0.1.5"
+httpdate = "1.0.3"
+hyper = { version = "1.12.0", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "server-auto", "http1", "http2"] }
+instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls"] }
+rand = "0.10.3"
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+redis = { version = "1.7.1", features = ["tokio-rustls-comp", "connection-manager", "script"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+socket2 = { version = "0.6", features = ["all"] }
+sha2 = "0.11.0"
+tokio = { version = "1.53.2", features = ["full"] }
+tokio-io-timeout = "1.2.1"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+x509-parser = "0.18.1"
+
+[dev-dependencies]
+time = "0.3"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

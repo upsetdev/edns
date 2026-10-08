@@ -14,13 +14,24 @@ concurrency:
 
 jobs:
   check:
-    name: Lint, test, vulncheck
+    name: Lint, test, audit
     runs-on: ubuntu-latest
+    # A real Redis, so the Redis-backed store, lock and capture tests run too.
+    services:
+      redis:
+        image: redis:8-alpine
+        ports: ["6379:6379"]
+    env:
+      EDNS_TEST_REDIS_URL: redis://127.0.0.1:6379
+      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
+      # rustup is preinstalled on the runner; this installs the toolchain
+      # pinned in rust-toolchain.toml (with rustfmt and clippy).
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
       - name: Lint
         run: make lint
       - name: Test

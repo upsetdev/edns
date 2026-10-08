@@ -1,23 +1,24 @@
 # Fly.io deployment. Deploy with:
-#   fly deploy --ha=false
+#   fly deploy
 #
-# Runs as a single Machine in sin only (next to the Upstash primary). Keep it
-# at one: each Machine has its own cert volume and would request its own cert.
+# Runs two Machines in sin (next to the Upstash primary), so a rolling deploy
+# always leaves one serving. They share everything through Redis: captures and
+# ACME challenges (STORE), and the certificate (CERT_STORE), which a lock in
+# Redis lets only one Machine order or renew. No volume is needed. Scale with
+# `fly scale count 2`; keep them in one region, as every capture and report
+# goes to the Redis primary.
 #
 # Requirements (already provisioned for edns-upset-dev):
 #   - a dedicated IPv4 (`fly ips allocate-v4`): Fly only routes UDP on one
-#   - the edns_certs volume for the Let's Encrypt certificate (CERT_DIR)
 #   - REDIS_URL secret pointing at the Upstash Redis (`fly redis create`)
+#   - TOKEN_SECRET secret (`fly secrets set TOKEN_SECRET=$(openssl rand -hex 32)`),
+#     so a token minted on one Machine verifies on the other
 #
 # All services are raw TCP/UDP passthrough so DNS sees the real resolver IP and
 # TLS is terminated in-process (rustls). TCP services add only the
 # proxy_proto handler, which prepends a PROXY header carrying the client's real
 # address (Fly's TCP proxy would otherwise hide it); PROXY_PROTOCOL=true makes
 # the app require that header. Change both together or TCP stops working.
-#
-# Optional: TOKEN_SECRET (`fly secrets set TOKEN_SECRET=$(openssl rand -hex 32)`)
-# keeps tokens valid across restarts; without it a restart only breaks lookups
-# in flight. It is required once more than one Machine runs.
 
 app = "edns-upset-dev"
 primary_region = "sin"
@@ -37,13 +38,9 @@ primary_region = "sin"
   DNS_UDP_ADDR = "fly-global-services:53"
   HTTP_ADDR = ":8080"
   HTTPS_ADDR = ":8443"
-  CERT_DIR = "/data"
   STORE = "redis"
+  CERT_STORE = "redis"
   PROXY_PROTOCOL = "true"
-
-[mounts]
-  source = "edns_certs"
-  destination = "/data"
 
 # DNS over UDP. Stopped machines are not woken by UDP, so keep one running.
 [[services]]

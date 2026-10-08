@@ -5,8 +5,8 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use hickory_proto::op::{Message, Metadata, OpCode, ResponseCode};
-use hickory_proto::rr::rdata::opt::{EdnsCode, EdnsOption};
+use hickory_proto::op::{Edns, Message, Metadata, OpCode, ResponseCode};
+use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsCode, EdnsOption};
 use hickory_proto::rr::rdata::{A, AAAA, HINFO, NS, SOA, TXT};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -32,8 +32,11 @@ const TCP_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
 const TCP_MAX_QUERIES: usize = 128;
-/// Largest UDP reply without EDNS (we never send an OPT record).
+/// Largest UDP reply to a query without EDNS.
 const UDP_MAX_REPLY: usize = 512;
+/// The UDP payload size we advertise and honour with EDNS: the DNS Flag Day
+/// 2020 value, which avoids IP fragmentation on virtually every path.
+const EDNS_MAX_PAYLOAD: u16 = 1232;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transport {
@@ -103,7 +106,11 @@ impl DnsHandler {
 
         let resp = self.handle(&req, peer, transport).await;
         let bytes = resp.to_vec().ok()?;
-        if transport == Transport::Udp && bytes.len() > UDP_MAX_REPLY {
+        let max = match &req.edns {
+            Some(e) => e.max_payload().clamp(UDP_MAX_REPLY as u16, EDNS_MAX_PAYLOAD).into(),
+            None => UDP_MAX_REPLY,
+        };
+        if transport == Transport::Udp && bytes.len() > max {
             return resp.truncate().to_vec().ok();
         }
         Some(bytes)
@@ -134,6 +141,7 @@ impl DnsHandler {
             }
             return m;
         }
+        m.edns = edns_reply(req);
 
         let Some(q) = req.queries.first() else { return m };
         let qname = q.name.to_ascii().to_lowercase();
@@ -239,6 +247,21 @@ impl DnsHandler {
 
 fn rr(name: &Name, ttl: u32, data: RData) -> Record {
     Record::from_rdata(name.clone(), ttl, data)
+}
+
+/// The OPT record for a reply: present when the query had one (RFC 6891
+/// requires it), echoing any client subnet with scope /0, which tells the
+/// resolver our answer is the same for every subnet (RFC 7871). Resolvers
+/// such as Google Public DNS only keep sending ECS to nameservers that echo
+/// it, and the forwarded subnet is what this service reports.
+fn edns_reply(req: &Message) -> Option<Edns> {
+    let query = req.edns.as_ref()?;
+    let mut e = Edns::new();
+    e.set_max_payload(EDNS_MAX_PAYLOAD);
+    if let Some(EdnsOption::Subnet(s)) = query.option(EdnsCode::Subnet) {
+        e.options_mut().insert(EdnsOption::Subnet(ClientSubnet::new(s.addr(), s.source_prefix(), 0)));
+    }
+    Some(e)
 }
 
 /// A FORMERR/NOTIMP reply to a query we couldn't (or won't) process: header
@@ -572,6 +595,42 @@ mod tests {
         assert!(!query(&h, "example.test.", RecordType::A, "198.51.101.1", None).await.metadata.truncation);
         h.clock.advance(Duration::from_secs(2));
         assert!(!query(&h, "example.test.", RecordType::A, "198.51.100.1", None).await.metadata.truncation);
+    }
+
+    /// Replies carry OPT exactly when the query did, and echo the client
+    /// subnet with scope /0 (RFC 7871), so resolvers keep forwarding it.
+    #[tokio::test]
+    async fn echoes_edns_and_client_subnet() {
+        let h = handler();
+        let tok = new_token();
+
+        let m = query(&h, &format!("{tok}.example.test."), RecordType::A, "198.51.100.7", Some("203.0.113.0/24")).await;
+        let edns = m.edns.as_ref().expect("no OPT in reply to an EDNS query");
+        assert_eq!(edns.max_payload(), EDNS_MAX_PAYLOAD);
+        match edns.option(EdnsCode::Subnet) {
+            Some(EdnsOption::Subnet(s)) => {
+                assert_eq!((s.addr().to_string(), s.source_prefix(), s.scope_prefix()), ("203.0.113.0".into(), 24, 0));
+            }
+            other => panic!("ECS not echoed: {other:?}"),
+        }
+
+        let v6 = query(&h, "example.test.", RecordType::AAAA, "198.51.100.7", Some("2001:db8:1::/56")).await;
+        match v6.edns.as_ref().and_then(|e| e.option(EdnsCode::Subnet)) {
+            Some(EdnsOption::Subnet(s)) => assert_eq!((s.source_prefix(), s.scope_prefix()), (56, 0)),
+            other => panic!("IPv6 ECS not echoed: {other:?}"),
+        }
+
+        // No EDNS in, no OPT out; out-of-zone refusals still carry it.
+        let plain = Message::from_vec(
+            &h.respond(&request("example.test.", RecordType::A, None), "198.51.100.7".parse().unwrap(), Transport::Udp)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(plain.edns.is_none(), "OPT added to a non-EDNS query");
+        let refused = query(&h, "example.com.", RecordType::A, "198.51.100.7", Some("203.0.113.0/24")).await;
+        assert_eq!(refused.metadata.response_code, ResponseCode::Refused);
+        assert!(refused.edns.is_some());
     }
 
     #[tokio::test]

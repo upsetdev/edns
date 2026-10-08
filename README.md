@@ -68,6 +68,10 @@ ACME validator.
 - Refuses queries for names outside the zone.
 - Answers `ANY` with a single `HINFO` record
   ([RFC 8482](https://www.rfc-editor.org/rfc/rfc8482)).
+- Replies to EDNS queries with an OPT record, and echoes any client subnet
+  with scope `/0` ([RFC 7871](https://www.rfc-editor.org/rfc/rfc7871)): the
+  answer is the same for every subnet. Resolvers such as Google Public DNS
+  only keep forwarding ECS to nameservers that echo it.
 - `A` queries for `<token>.<base>` trigger the capture. Names that aren't
   valid, unexpired tokens are answered without touching the store.
 - `TXT` queries for `_acme-challenge.<base>` return the current DNS-01 values.
@@ -94,8 +98,9 @@ this).
 ## Production deployment
 
 [edns.upset.dev](https://edns.upset.dev) runs on **[Fly.io](https://fly.io)**:
-a single Machine in Singapore (`sin`), with
-[Upstash Redis](https://fly.io/docs/upstash/redis/) as the token store. Every
+two Machines in Singapore (`sin`), sharing
+[Upstash Redis](https://fly.io/docs/upstash/redis/) for captures and the
+certificate. Every
 push to `main` that passes CI is deployed automatically with `fly deploy`
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)); the configuration is
 in [`fly.toml`](fly.toml).
@@ -126,20 +131,22 @@ turn it off for these records.
 fly apps create <app>
 fly ips allocate-v4 -a <app>            # dedicated IPv4: Fly only routes UDP on one
 fly ips allocate-v6 -a <app>
-fly volumes create edns_certs -a <app> -r <region> -s 1
 fly redis create --name <app>-redis --region <region> --plan Pay-as-you-go --no-replicas
 fly secrets set -a <app> REDIS_URL='redis://default:...@fly-<app>-redis.upstash.io:6379'
-fly secrets set -a <app> TOKEN_SECRET=$(openssl rand -hex 32)   # optional on one Machine
+fly secrets set -a <app> TOKEN_SECRET=$(openssl rand -hex 32)
 ```
 
-Redis is optional on a single Machine: drop the `fly redis create` and
-`REDIS_URL` steps and set `STORE = "memory"` in `fly.toml`.
+For a single Machine without Redis, skip the Redis steps, create a volume
+(`fly volumes create edns_certs -a <app> -r <region> -s 1`), and in
+`fly.toml` set `STORE = "memory"`, `CERT_STORE = "file"`, and mount the volume
+at `/data` with a `[mounts]` section. Deploy with `fly deploy --ha=false`.
 
 Copy `fly.toml`, then set `app`, `primary_region`, `BASE_DOMAIN`, `NS`, `HTTP_IP`
-and `HTTP_IPV6` to your values, and deploy:
+and `HTTP_IPV6` to your values, and deploy two Machines:
 
 ```bash
-fly deploy --ha=false
+fly deploy
+fly scale count 2 -a <app>
 ```
 
 Fly.io details to know:
@@ -148,17 +155,18 @@ Fly.io details to know:
   destination ports, and replies have to leave from that address. `fly.toml`
   handles this with `DNS_UDP_ADDR`. The image grants `CAP_NET_BIND_SERVICE` so
   the non-root process can bind port 53.
-- **Run a single Machine, or share certificates.** With the default
-  `CERT_STORE=file`, each Machine has its own certificate volume and would
-  request its own certificate. To run several, set `STORE=redis`,
-  `CERT_STORE=redis` and a shared `TOKEN_SECRET`, and drop the volume. They
-  then share one certificate, and a lock in Redis makes sure only one Machine
-  orders or renews it. Certificates are served from memory, so this adds no
-  Redis commands per TLS handshake.
+- **Several Machines share one certificate.** With `CERT_STORE=redis` (and
+  `STORE=redis`, plus one `TOKEN_SECRET` for all), a lock in Redis makes sure
+  only one Machine orders or renews it, and no volume is needed. Certificates
+  are served from memory, so this adds no Redis commands per TLS handshake.
+  With `CERT_STORE=file` instead, each Machine has its own volume and would
+  request its own certificate, so run only one.
+- **Keep the Machines in one region.** Every capture and report goes to the
+  Redis primary; a second region would add that round trip to each lookup.
 - **TCP uses the PROXY protocol.** Fly's TCP proxy hides the client address,
   so the TCP services enable Fly's `proxy_proto` handler and the app requires
   the header (`PROXY_PROTOCOL=true`). Change both together.
-- **Keep the Machine running.** Incoming UDP doesn't wake a stopped Machine,
+- **Keep the Machines running.** Incoming UDP doesn't wake a stopped Machine,
   so `fly.toml` disables auto-stop.
 
 ### 2b. Deploy anywhere else (Docker)

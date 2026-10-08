@@ -6,11 +6,11 @@
 #
 # Requirements (already provisioned for edns-upset-dev):
 #   - a dedicated IPv4 (`fly ips allocate-v4`): Fly only routes UDP on one
-#   - the edns_certs volume for CertMagic certificates
+#   - the edns_certs volume for the Let's Encrypt certificate (CERT_DIR)
 #   - REDIS_URL secret pointing at the Upstash Redis (`fly redis create`)
 #
 # All services are raw TCP/UDP passthrough so DNS sees the real resolver IP and
-# TLS is terminated in-process by CertMagic. TCP services add only the
+# TLS is terminated in-process (rustls). TCP services add only the
 # proxy_proto handler, which prepends a PROXY header carrying the client's real
 # address (Fly's TCP proxy would otherwise hide it); PROXY_PROTOCOL=true makes
 # the app require that header. Change both together or TCP stops working.

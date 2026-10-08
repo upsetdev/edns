@@ -1,26 +1,31 @@
 # Local equivalents of the CI checks. `make check` before opening a PR.
+#
+# The Redis tests run when EDNS_TEST_REDIS_URL is set; `make test-redis`
+# starts a throwaway Redis in Docker for them.
 
-STATICCHECK := honnef.co/go/tools/cmd/staticcheck@v0.8.1
-GOVULNCHECK := golang.org/x/vuln/cmd/govulncheck@v1.8.0
-
-.PHONY: build test lint vuln check fmt docker
+.PHONY: build test test-redis lint vuln check fmt docker
 
 build:
-	CGO_ENABLED=0 go build -trimpath -o edns .
+	cargo build --release --locked
 
 test:
-	go test -race -count=1 ./...
+	cargo test --locked
+
+test-redis:
+	@docker run -d --rm --name edns-test-redis -p 127.0.0.1:56379:6379 redis:8-alpine >/dev/null
+	@sleep 1
+	EDNS_TEST_REDIS_URL=redis://127.0.0.1:56379 cargo test --locked; \
+		status=$$?; docker stop edns-test-redis >/dev/null; exit $$status
 
 fmt:
-	gofmt -w .
+	cargo fmt
 
 lint:
-	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
-	go vet ./...
-	go run $(STATICCHECK) ./...
+	cargo fmt --check
+	cargo clippy --all-targets --locked -- -D warnings
 
 vuln:
-	go run $(GOVULNCHECK) ./...
+	cargo audit
 
 check: lint test vuln
 

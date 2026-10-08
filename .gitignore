@@ -1,12 +1,10 @@
 # Build output
-/edns
+/target/
 /tmp/
 /dist/
 
 # Test and coverage artifacts
-*.test
-*.out
-coverage.*
+*.profraw
 
 # Local tooling
 .claude/

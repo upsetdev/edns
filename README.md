@@ -52,11 +52,12 @@ rest of the token's one-hour life. The store is in memory by default. With
 Redis, any instance can handle any step, as long as all instances share the
 same Redis and `TOKEN_SECRET`.
 
-HTTPS uses a wildcard certificate (`<base>` + `*.<base>`), obtained and renewed
-automatically by [CertMagic](https://github.com/caddyserver/certmagic) using a
-DNS-01 challenge, and stored on disk or, for several instances, in Redis. This process is the zone's authoritative server, so
-publishing the challenge only means writing a TXT value to Redis. The DNS
-handler then serves it to the ACME validator.
+HTTPS uses one Let's Encrypt certificate for `<base>` and `*.<base>`, obtained
+and renewed automatically (when a third of its lifetime is left) using a
+DNS-01 challenge, and stored on disk or, for several instances, in Redis. This
+process is the zone's authoritative server, so publishing the challenge only
+means writing a TXT value to the store. The DNS handler then serves it to the
+ACME validator.
 
 ### DNS behaviour
 
@@ -202,7 +203,7 @@ All configuration is through environment variables.
 | `DNS_RATE_LIMIT`  | `20`                    | DNS queries per second per source `/24` or `/56`, bursting to 5×. `0` disables.       |
 | `HTTP_RATE_LIMIT` | `2`                     | HTTP requests per second per client IPv4 or IPv6 `/64`, bursting to 5×. `0` disables. |
 | `PROXY_PROTOCOL`  | `false`                 | Require a PROXY protocol header on TCP listeners (DNS, HTTP, HTTPS).                  |
-| `TLS`             | `true`                  | Serve HTTPS with CertMagic and redirect plain HTTP to it.                             |
+| `TLS`             | `true`                  | Serve HTTPS with a Let's Encrypt certificate and redirect plain HTTP to it.           |
 | `ACME_EMAIL`      | _(empty)_               | Let's Encrypt account contact.                                                        |
 | `ACME_STAGING`    | `false`                 | Use the Let's Encrypt staging CA, for testing.                                        |
 | `CERT_STORE`      | `file`                  | `file` (`CERT_DIR`) or `redis` (shared by instances; requires `STORE=redis`).         |
@@ -221,23 +222,42 @@ database as well, so a sustained flood can't run up the bill.
 
 ## Development
 
-Requires Go (the version is in [`go.mod`](go.mod)). Tests use an in-memory Redis
-([miniredis](https://github.com/alicebob/miniredis)), so they don't need any
-external services.
+Requires Rust (the version is pinned in
+[`rust-toolchain.toml`](rust-toolchain.toml); rustup installs it on first use).
+The tests need no external services. The Redis-backed tests run as well when
+`EDNS_TEST_REDIS_URL` points at a Redis; `make test-redis` starts a throwaway
+one in Docker.
 
 ```bash
-make test     # unit + end-to-end tests with the race detector
-make lint     # gofmt, go vet, staticcheck
-make vuln     # govulncheck
-make check    # all of the above, as run in CI
+make test        # unit + end-to-end tests
+make test-redis  # the same, plus the Redis backend (needs Docker)
+make lint        # rustfmt, clippy
+make vuln        # cargo audit
+make check       # lint, test and vuln, as run in CI (CI also runs Redis)
 ```
+
+The code, in `src/`:
+
+| Module         | What it does |
+| -------------- | ------------ |
+| `main.rs`      | Startup: binds the listeners and runs the servers. |
+| `config.rs`    | Environment variables, validated. |
+| `token.rs`     | Signed, self-expiring tokens. |
+| `dns.rs`       | The authoritative DNS server and token capture. |
+| `http.rs`      | Mint, report, favicon, HTTPS redirect, CORS. |
+| `limit.rs`     | Per-source rate limits and the per-token capture guard. |
+| `net.rs`       | TCP/UDP listeners: connection caps, PROXY protocol. |
+| `store.rs`     | Captures and ACME challenge records, in memory (`store/memory.rs`) or Redis (`store/redis.rs`). |
+| `tls.rs`       | The ACME client and certificate renewal loop. |
+| `certstore.rs` | Certificate storage (files or Redis) and the distributed lock. |
+| `clock.rs`     | A clock tests can freeze and advance. |
 
 To run locally without TLS, on unprivileged ports (avoid 5353, which mDNS
 usually holds):
 
 ```bash
-go build -o edns .
-HTTP_IP=127.0.0.1 BASE_DOMAIN=edns.localhost TLS=false DNS_ADDR=:5300 ./edns
+cargo build --release
+HTTP_IP=127.0.0.1 BASE_DOMAIN=edns.localhost TLS=false DNS_ADDR=:5300 ./target/release/edns
 ```
 
 Your system resolver never queries this server for `*.localhost`, so do the

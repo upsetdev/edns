@@ -1,12 +1,12 @@
 # Fly.io deployment. Deploy with:
 #   fly deploy
 #
-# Runs two Machines in sin (next to the Upstash primary), so a rolling deploy
-# always leaves one serving. They share everything through Redis: captures and
-# ACME challenges (STORE), and the certificate (CERT_STORE), which a lock in
-# Redis lets only one Machine order or renew. No volume is needed. Scale with
-# `fly scale count 2`; keep them in one region, as every capture and report
-# goes to the Redis primary.
+# Run at least two Machines, so a rolling deploy always leaves one serving.
+# They share everything through Redis: captures and ACME challenges (STORE),
+# and the certificate (CERT_STORE), which a lock in Redis lets only one Machine
+# order or renew. No volume is needed. Scale per region with
+# `fly scale count <n> --region <region>`. Every capture and report goes to the
+# Redis primary, so Machines in other regions pay that round trip.
 #
 # Requirements (already provisioned for edns-upset-dev):
 #   - a dedicated IPv4 (`fly ips allocate-v4`): Fly only routes UDP on one
@@ -85,6 +85,10 @@ primary_region = "sin"
   [[services.ports]]
     port = 443
     handlers = ["proxy_proto"]
+
+# Restart the Machine whenever it exits, not only on a crash.
+[[restart]]
+  policy = "always"
 
 [[vm]]
   size = "shared-cpu-1x"

@@ -66,6 +66,9 @@ pub struct Config {
     pub http_rate_limit: f64,
     /// HTTP requests allowed at once per client.
     pub http_rate_burst: u32,
+    /// Which instance served a response, sent as X-Upset-ID: the Fly Machine
+    /// or container ID, plus the Fly region when there is one.
+    pub instance_id: Option<String>,
 }
 
 /// Ensures a trailing dot.
@@ -173,6 +176,13 @@ impl Config {
             Name::from_ascii(name).with_context(|| format!("{key}: invalid domain name {name:?}"))?;
         }
 
+        // On Fly.io the Machine ID; self-hosted, Docker sets HOSTNAME to the
+        // container ID. FLY_REGION only exists on Fly.
+        let instance_id = match (get("FLY_MACHINE_ID").or_else(|| get("HOSTNAME")), get("FLY_REGION")) {
+            (Some(id), Some(region)) => Some(format!("{id}-{region}")),
+            (id, region) => id.or(region),
+        };
+
         let dns_addr = env("DNS_ADDR", ":53");
         Ok(Config {
             base_domain: base,
@@ -199,6 +209,7 @@ impl Config {
             dns_rate_burst,
             http_rate_limit,
             http_rate_burst,
+            instance_id,
         })
     }
 
@@ -245,6 +256,7 @@ pub(crate) mod tests {
             dns_rate_burst: 1,
             http_rate_limit: 0.0,
             http_rate_burst: 1,
+            instance_id: None,
         }
     }
 
@@ -297,6 +309,26 @@ pub(crate) mod tests {
         assert_eq!((cfg.dns_rate_limit, cfg.http_rate_limit, cfg.http_rate_burst), (0.0, 0.5, 40));
         assert_eq!(cfg.token_secret, secret.as_bytes());
         assert_eq!(cfg.http_ipv6, Some("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn instance_id() {
+        let cases = [
+            (
+                vec![("FLY_MACHINE_ID", "d8e1f2a3b4c5d6"), ("FLY_REGION", "ams"), ("HOSTNAME", "x")],
+                Some("d8e1f2a3b4c5d6-ams"),
+            ),
+            // Self-hosted: Docker's HOSTNAME is the container ID, with no region.
+            (vec![("HOSTNAME", "3f4e8a9b1c2d")], Some("3f4e8a9b1c2d")),
+            (vec![("FLY_REGION", "ams")], Some("ams")),
+            (vec![("HOSTNAME", ""), ("FLY_REGION", "")], None),
+            (vec![], None),
+        ];
+        for (mut vars, want) in cases {
+            vars.push(("HTTP_IP", "192.0.2.10"));
+            let cfg = load(&vars).unwrap();
+            assert_eq!(cfg.instance_id.as_deref(), want, "{vars:?}");
+        }
     }
 
     #[test]

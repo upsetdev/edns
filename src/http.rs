@@ -50,24 +50,41 @@ pub struct HttpHandler {
     store: Arc<Store>,
     /// Per client IPv4 or IPv6 /64; `None` = unlimited.
     limit: Option<Limiter>,
+    /// X-Upset-ID, the instance that served the response.
+    instance_id: Option<HeaderValue>,
     clock: Clock,
 }
 
 impl HttpHandler {
     pub fn new(cfg: Arc<Config>, store: Arc<Store>) -> Self {
         LazyLock::force(&FAVICON_MODIFIED);
+        let instance_id = cfg.instance_id.as_deref().and_then(|id| {
+            HeaderValue::from_str(id)
+                .inspect_err(|_| tracing::warn!("instance id {id:?} is not a valid header value"))
+                .ok()
+        });
         HttpHandler {
             limit: Limiter::new(cfg.http_rate_limit, cfg.http_rate_burst),
+            instance_id,
             cfg,
             store,
             clock: Clock::system(),
         }
     }
 
-    /// The complete handler chain. When TLS is on, every request is forced
-    /// onto HTTPS: insecure ones are redirected, secure ones get HSTS so
-    /// browsers stay on HTTPS thereafter.
+    /// The complete handler chain. Every response says which instance served
+    /// it (X-Upset-ID).
     pub async fn serve<B>(&self, req: Request<B>, peer: IpAddr, tls: bool) -> Resp {
+        let mut resp = self.secure(req, peer, tls).await;
+        if let Some(id) = &self.instance_id {
+            resp.headers_mut().insert("x-upset-id", id.clone());
+        }
+        resp
+    }
+
+    /// When TLS is on, every request is forced onto HTTPS: insecure ones are
+    /// redirected, secure ones get HSTS so browsers stay on HTTPS thereafter.
+    async fn secure<B>(&self, req: Request<B>, peer: IpAddr, tls: bool) -> Resp {
         // Secure when it reached us over TLS, directly (in-process) or via a
         // TLS-terminating proxy that set X-Forwarded-Proto.
         let secure = tls
@@ -118,6 +135,8 @@ impl HttpHandler {
         h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, OPTIONS"));
         h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("*"));
         h.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400"));
+        // So cross-origin scripts can read which instance served them.
+        h.insert(header::ACCESS_CONTROL_EXPOSE_HEADERS, HeaderValue::from_static("X-Upset-ID"));
         resp
     }
 
@@ -585,6 +604,28 @@ mod tests {
         }
     }
 
+    /// Every response, redirects and errors included, names the instance.
+    #[tokio::test]
+    async fn instance_id_header() {
+        let mut cfg = test_config();
+        cfg.instance_id = Some("d8e1f2a3b4c5d6-ams".into());
+        let h = HttpHandler::new(Arc::new(cfg), new_store());
+        let tok = token::mint(&test_config(), SystemTime::now());
+        for url in [
+            "http://example.test/".to_string(),
+            format!("http://{tok}.example.test/"),
+            "http://www.example.test/".into(),
+            "http://192.0.2.10/".into(),
+        ] {
+            let (resp, _) = get(&h, &url).await;
+            assert_eq!(hdr(&resp, "x-upset-id"), "d8e1f2a3b4c5d6-ams", "{url}");
+        }
+
+        // Without an instance id there's no header at all.
+        let h = HttpHandler::new(Arc::new(test_config()), new_store());
+        assert!(get(&h, "http://example.test/").await.0.headers().get("x-upset-id").is_none());
+    }
+
     #[tokio::test]
     async fn cors_preflight() {
         let h = HttpHandler::new(Arc::new(test_config()), new_store());
@@ -592,6 +633,7 @@ mod tests {
         let (resp, _) = get_with(&h, Method::OPTIONS, &format!("http://{tok}.example.test/"), &[], PEER).await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert_eq!(hdr(&resp, "access-control-allow-origin"), "*");
+        assert_eq!(hdr(&resp, "access-control-expose-headers"), "X-Upset-ID");
     }
 
     #[test]

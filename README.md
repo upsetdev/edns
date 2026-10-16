@@ -66,6 +66,10 @@ ACME validator.
   `https://<base>/`.
 - With TLS on, plain HTTP is redirected to HTTPS, and HTTPS responses carry
   HSTS.
+- Every response carries `X-Upset-ID`, naming the instance that served it:
+  `<machine id>-<region>` on Fly.io (`FLY_MACHINE_ID`, `FLY_REGION`), or the
+  container ID (`HOSTNAME`) when self-hosted. It's exposed to cross-origin
+  scripts via CORS.
 
 ### DNS behaviour
 
